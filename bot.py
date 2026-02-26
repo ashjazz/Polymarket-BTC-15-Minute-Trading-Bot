@@ -28,11 +28,11 @@ import random
 # 方法 3: 使用 VPN
 #
 # 你可以在 .env 文件中设置:
-#   PROXY_URL=http://localhost:10808
+#   PROXY_URL=http://localhost:8001
 #   或者直接在此设置
 # =============================================================================
 
-PROXY_URL = os.getenv("PROXY_URL", "http://localhost:10808")
+PROXY_URL = os.getenv("PROXY_URL", "http://localhost:8001")
 if PROXY_URL:
     os.environ["HTTP_PROXY"] = PROXY_URL
     os.environ["HTTPS_PROXY"] = PROXY_URL
@@ -110,6 +110,17 @@ if patch_applied:
     logger.info("Market order patch applied successfully")
 else:
     logger.warning("Market order patch failed - orders may be rejected")
+
+# WebSocket 代理补丁 - 解决 Rust WebSocket 客户端无法使用代理的问题
+try:
+    from patch_websocket_proxy import apply_websocket_proxy_patch
+    ws_patch_applied = apply_websocket_proxy_patch()
+    if ws_patch_applied:
+        logger.info("WebSocket proxy patch applied successfully")
+    else:
+        logger.warning("WebSocket proxy patch failed - connection may fail in restricted networks")
+except ImportError as e:
+    logger.warning(f"Could not import WebSocket proxy patch: {e}")
 
 
 # =============================================================================

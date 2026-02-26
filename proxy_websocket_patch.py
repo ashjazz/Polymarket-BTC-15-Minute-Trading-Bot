@@ -197,8 +197,8 @@ if __name__ == "__main__":
     proxy = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("ALL_PROXY")
     if not proxy:
         print("请设置代理环境变量:")
-        print("  export HTTP_PROXY=http://localhost:10808")
-        print("  export HTTPS_PROXY=http://localhost:10808")
+        print("  export HTTP_PROXY=http://localhost:8001")
+        print("  export HTTPS_PROXY=http://localhost:8001")
         sys.exit(1)
 
     print(f"测试代理: {proxy}")
