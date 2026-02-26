@@ -9,6 +9,13 @@ from datetime import datetime
 from typing import Optional, Dict, Any, List
 from loguru import logger
 
+# Import enhanced connection modules
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from connection_config import CONNECTION_CONFIG
+from circuit_breaker import get_circuit_breaker, get_retry_manager
+
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import OrderArgs, OrderType as PolyOrderType
 from py_clob_client.order_builder.constants import BUY, SELL
@@ -37,7 +44,7 @@ class PolymarketClient:
     ):
         """
         Initialize Polymarket client.
-        
+
         Args:
             private_key: Ethereum private key (without 0x prefix)
             api_key: Polymarket API key
@@ -51,28 +58,32 @@ class PolymarketClient:
         self.api_key = api_key or os.getenv("POLYMARKET_API_KEY")
         self.api_secret = api_secret or os.getenv("POLYMARKET_API_SECRET")
         self.api_passphrase = api_passphrase or os.getenv("POLYMARKET_PASSPHRASE")
-        
+
         self.chain_id = chain_id
         self.testnet = testnet
-        
+
         # Client instance
         self.client: Optional[ClobClient] = None
         self._connected = False
-        
+
         # Market cache
         self._markets_cache: Dict[str, Any] = {}
-        
+
+        # Circuit breaker and retry manager for resilience
+        self.circuit_breaker = get_circuit_breaker("polymarket_api")
+        self.retry_manager = get_retry_manager("polymarket_api")
+
         # Check if SDK available
         if not POLYMARKET_AVAILABLE:
             logger.error("Polymarket SDK not available. Install: pip install py-clob-client")
             return
-        
+
         # Validate credentials
         if not self.private_key:
             logger.error("POLYMARKET_PK not found in environment")
         if not self.api_key:
             logger.error("POLYMARKET_API_KEY not found in environment")
-        
+
         mode = "TESTNET" if testnet else "MAINNET"
         logger.info(f"Initialized Polymarket Client [{mode}] Chain ID: {chain_id}")
     

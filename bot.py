@@ -10,6 +10,36 @@ from dataclasses import dataclass
 from typing import List, Optional, Dict
 import random
 
+# =============================================================================
+# PROXY CONFIGURATION - 设置代理以访问 Polymarket API
+# =============================================================================
+# 重要说明：
+# NautilusTrader 的 WebSocket 客户端使用 Rust 实现，不会自动使用环境变量中的代理。
+# 如果你在中国大陆等需要代理的地区，请使用以下方法之一：
+#
+# 方法 1: 安装 aiohttp_socks (推荐)
+#   pip install aiohttp_socks
+#
+# 方法 2: 配置系统级代理
+#   - Clash: 开启 TUN 模式 或 "设置为系统代理"
+#   - Proxifier: 配置 Python 使用代理
+#   -Surge: 开启增强模式
+#
+# 方法 3: 使用 VPN
+#
+# 你可以在 .env 文件中设置:
+#   PROXY_URL=http://localhost:10808
+#   或者直接在此设置
+# =============================================================================
+
+PROXY_URL = os.getenv("PROXY_URL", "http://localhost:10808")
+if PROXY_URL:
+    os.environ["HTTP_PROXY"] = PROXY_URL
+    os.environ["HTTPS_PROXY"] = PROXY_URL
+    os.environ["ALL_PROXY"] = PROXY_URL
+    print(f"[PROXY] 已配置代理: {PROXY_URL}")
+    print("[PROXY] 注意: NautilusTrader WebSocket 可能需要系统级代理")
+
 # Add project to path
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
@@ -56,6 +86,10 @@ from nautilus_trader.model.data import QuoteTick
 from dotenv import load_dotenv
 from loguru import logger
 import redis
+
+# Import enhanced connection modules for timeout handling
+from connection_config import CONNECTION_CONFIG
+from circuit_breaker import get_circuit_breaker, get_retry_manager
 
 # Import our phases
 from core.strategy_brain.signal_processors.spike_detector import SpikeDetectionProcessor
@@ -117,11 +151,15 @@ def init_redis():
             port=int(os.getenv('REDIS_PORT', 6379)),
             db=int(os.getenv('REDIS_DB', 2)),
             decode_responses=True,
-            socket_connect_timeout=5,
-            socket_keepalive=True
+            socket_connect_timeout=CONNECTION_CONFIG.REDIS_CONNECT_TIMEOUT,
+            socket_timeout=CONNECTION_CONFIG.REDIS_SOCKET_TIMEOUT,
+            socket_keepalive=True,
+            socket_keepalive_options={},
+            retry_on_timeout=True,  # 超时自动重试
+            health_check_interval=30,  # 定期健康检查
         )
         redis_client.ping()
-        logger.info("Redis connection established")
+        logger.info(f"Redis connection established (timeout={CONNECTION_CONFIG.REDIS_SOCKET_TIMEOUT}s)")
         return redis_client
     except Exception as e:
         logger.warning(f"Redis connection failed: {e}")
@@ -301,6 +339,32 @@ class IntegratedBTCStrategy(Strategy):
         except Exception as e:
             logger.warning(f"Failed to check Redis simulation mode: {e}")
         return self.current_simulation_mode
+
+    def check_connection_health(self) -> bool:
+        """
+        检查所有关键连接的健康状态
+        Returns: True 如果所有连接健康
+        """
+        # 检查 Redis
+        if self.redis_client:
+            try:
+                self.redis_client.ping()
+            except Exception as e:
+                logger.error(f"Redis health check failed: {e}")
+                return False
+        
+        # 检查数据引擎
+        if hasattr(self, 'data_engine') and not self.data_engine.is_running:
+            logger.error("Data engine is not running")
+            return False
+        
+        # 检查执行引擎
+        if hasattr(self, 'exec_engine') and not self.exec_engine.is_running:
+            logger.error("Exec engine is not running")
+            return False
+        
+        logger.debug("All connections healthy")
+        return True
 
     # ------------------------------------------------------------------
     # Strategy lifecycle
@@ -1344,7 +1408,7 @@ def run_integrated_bot(simulation: bool = False, enable_grafana: bool = True, te
     unix_interval_start = (int(now.timestamp()) // 900) * 900  # current 15-min boundary
 
     btc_slugs = []
-    for i in range(-1, 97):  # include 1 prior interval (in case we're just after boundary)
+    for i in range(0, 3):  # include 1 prior interval (in case we're just after boundary)
         timestamp = unix_interval_start + (i * 900)
         btc_slugs.append(f"btc-updown-15m-{timestamp}")
 
@@ -1353,7 +1417,7 @@ def run_integrated_bot(simulation: bool = False, enable_grafana: bool = True, te
         "closed": False,
         "archived": False,
         "slug": tuple(btc_slugs),
-        "limit": 100,
+        "limit": 10,
     }
 
     logger.info("=" * 80)
@@ -1375,6 +1439,9 @@ def run_integrated_bot(simulation: bool = False, enable_grafana: bool = True, te
         passphrase=os.getenv("POLYMARKET_PASSPHRASE"),
         signature_type=1,
         instrument_provider=instrument_cfg,
+        # WebSocket connection settings
+        ws_connection_initial_delay_secs=10.0,  # Increased from 5s
+        ws_connection_delay_secs=1.0,  # Increased from 0.1s
     )
 
     poly_exec_cfg = PolymarketExecClientConfig(
@@ -1384,6 +1451,11 @@ def run_integrated_bot(simulation: bool = False, enable_grafana: bool = True, te
         passphrase=os.getenv("POLYMARKET_PASSPHRASE"),
         signature_type=1,
         instrument_provider=instrument_cfg,
+        # WebSocket retry settings
+        max_retries=5,  # Increased retries for WebSocket connection
+        retry_delay_initial_ms=1000,  # 1 second initial delay
+        retry_delay_max_ms=30000,  # 30 seconds max delay
+        ack_timeout_secs=10.0,  # Increased from 5s
     )
 
     config = TradingNodeConfig(
@@ -1393,12 +1465,17 @@ def run_integrated_bot(simulation: bool = False, enable_grafana: bool = True, te
             log_level="INFO",
             log_directory="./logs/nautilus",
         ),
-        data_engine=LiveDataEngineConfig(qsize=6000),
-        exec_engine=LiveExecEngineConfig(qsize=6000),
+        data_engine=LiveDataEngineConfig(qsize=CONNECTION_CONFIG.DATA_ENGINE_QSIZE),
+        exec_engine=LiveExecEngineConfig(qsize=CONNECTION_CONFIG.EXEC_ENGINE_QSIZE),
         risk_engine=LiveRiskEngineConfig(bypass=simulation),
         data_clients={POLYMARKET: poly_data_cfg},
         exec_clients={POLYMARKET: poly_exec_cfg},
+        # ⭐ 使用连接配置中的超时值（解决超时问题）
+        timeout_connection=float(CONNECTION_CONFIG.NODE_TIMEOUT),
+        timeout_reconciliation=float(CONNECTION_CONFIG.DATA_ENGINE_TIMEOUT),
     )
+    logger.info(f"TradingNode config: timeout_connection={CONNECTION_CONFIG.NODE_TIMEOUT}s, "
+                f"qsize={CONNECTION_CONFIG.DATA_ENGINE_QSIZE}")
 
     strategy = IntegratedBTCStrategy(
         redis_client=redis_client,
@@ -1423,6 +1500,27 @@ def run_integrated_bot(simulation: bool = False, enable_grafana: bool = True, te
         node.run()
     except KeyboardInterrupt:
         print("\nShutting down...")
+    except TimeoutError as e:
+        logger.error(f"Timeout error: {e}")
+        logger.error("Bot encountered timeout - will be restarted by wrapper")
+        raise  # 让 wrapper 重新启动
+    except ConnectionError as e:
+        logger.error(f"Connection error: {e}")
+        logger.error("Bot encountered connection issue - will be restarted by wrapper")
+        raise  # 让 wrapper 重新启动
+    except asyncio.TimeoutError as e:
+        logger.error(f"Async timeout error: {e}")
+        logger.error("Bot encountered async timeout - will be restarted by wrapper")
+        raise
+    except OSError as e:
+        # Handle network-related OS errors (errno 60 = connection timed out)
+        logger.error(f"Network OS error: {e} (errno: {e.errno if hasattr(e, 'errno') else 'N/A'})")
+        logger.error("Bot encountered network issue - will be restarted by wrapper")
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
+        logger.error("Bot will be restarted by wrapper")
+        raise  # 让 wrapper 重新启动
     finally:
         node.dispose()
         logger.info("Bot stopped")

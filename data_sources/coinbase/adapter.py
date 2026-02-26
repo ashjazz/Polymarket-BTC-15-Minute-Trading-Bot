@@ -9,6 +9,13 @@ from typing import Optional, List, Dict, Any
 import httpx
 from loguru import logger
 
+# Import enhanced connection modules
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from connection_config import CONNECTION_CONFIG
+from circuit_breaker import get_circuit_breaker, get_retry_manager
+
 
 class CoinbaseDataSource:
     """
@@ -28,7 +35,7 @@ class CoinbaseDataSource:
     ):
         """
         Initialize Coinbase data source.
-        
+
         Args:
             base_url: Coinbase Pro API base URL
             product_id: Trading pair (default: BTC-USD)
@@ -36,38 +43,65 @@ class CoinbaseDataSource:
         self.base_url = base_url
         self.product_id = product_id
         self.session: Optional[httpx.AsyncClient] = None
-        
+
         # Cache
         self._last_price: Optional[Decimal] = None
         self._last_update: Optional[datetime] = None
-        
+
+        # Circuit breaker and retry manager for resilience
+        self.circuit_breaker = get_circuit_breaker("coinbase_api")
+        self.retry_manager = get_retry_manager("coinbase_api")
+
         logger.info(f"Initialized Coinbase data source for {product_id}")
     
     async def connect(self) -> bool:
         """
         Connect to Coinbase API.
-        
+
         Returns:
             True if connection successful
         """
         try:
+            # Use enhanced timeout configuration
             self.session = httpx.AsyncClient(
                 base_url=self.base_url,
-                timeout=30.0,
+                timeout=httpx.Timeout(
+                    connect=CONNECTION_CONFIG.API_CONNECT_TIMEOUT,
+                    read=CONNECTION_CONFIG.API_READ_TIMEOUT,
+                    write=CONNECTION_CONFIG.API_CONNECT_TIMEOUT,
+                    pool=CONNECTION_CONFIG.API_CONNECT_TIMEOUT,
+                ),
                 headers={
                     "User-Agent": "PolymarketBot/1.0",
                     "Accept": "application/json",
-                }
+                },
+                limits=httpx.Limits(
+                    max_keepalive_connections=5,
+                    max_connections=10,
+                    keepalive_expiry=30.0,
+                ),
             )
-            
-            # Test connection
-            response = await self.session.get(f"/products/{self.product_id}")
-            response.raise_for_status()
-            
-            logger.info("✓ Connected to Coinbase API")
-            return True
-            
+
+            # Test connection with circuit breaker protection
+            async def _test_connection():
+                response = await self.session.get(f"/products/{self.product_id}")
+                response.raise_for_status()
+                return True
+
+            success = await self.retry_manager.execute_with_retry(
+                _test_connection,
+                operation_name="coinbase_connect",
+                retryable_exceptions=(httpx.TimeoutException, httpx.ConnectError, OSError),
+            )
+
+            if success:
+                self.circuit_breaker.record_success()
+                logger.info("✓ Connected to Coinbase API with enhanced timeout config")
+                return True
+            return False
+
         except Exception as e:
+            self.circuit_breaker.record_failure(e)
             logger.error(f"Failed to connect to Coinbase: {e}")
             return False
     
@@ -79,27 +113,40 @@ class CoinbaseDataSource:
     
     async def get_current_price(self) -> Optional[Decimal]:
         """
-        Get current BTC price.
-        
+        Get current BTC price with retry and circuit breaker protection.
+
         Returns:
             Current price or None if error
         """
+        # Check circuit breaker
+        if not self.circuit_breaker.can_execute():
+            logger.warning(f"Coinbase: Circuit breaker OPEN - returning cached price")
+            return self._last_price
+
         try:
-            response = await self.session.get(f"/products/{self.product_id}/ticker")
-            response.raise_for_status()
-            
-            data = response.json()
+            async def _fetch_price():
+                response = await self.session.get(f"/products/{self.product_id}/ticker")
+                response.raise_for_status()
+                return response.json()
+
+            data = await self.retry_manager.execute_with_retry(
+                _fetch_price,
+                operation_name="coinbase_get_price",
+                retryable_exceptions=(httpx.TimeoutException, httpx.ConnectError, OSError),
+            )
+
             price = Decimal(str(data["price"]))
-            
             self._last_price = price
             self._last_update = datetime.now()
-            
+            self.circuit_breaker.record_success()
+
             logger.debug(f"Coinbase BTC price: ${price:,.2f}")
             return price
-            
+
         except Exception as e:
-            logger.error(f"Error fetching Coinbase price: {e}")
-            return None
+            self.circuit_breaker.record_failure(e)
+            logger.error(f"Error fetching Coinbase price: {e} | Circuit state: {self.circuit_breaker.state.value}")
+            return self._last_price  # Return cached price on failure
     
     async def get_order_book(self, level: int = 2) -> Optional[Dict[str, Any]]:
         """
