@@ -807,7 +807,7 @@ class IntegratedBTCStrategy(Strategy):
             #   2.0+ shares = price $0.50 → pure coin flip, SKIP
             # =========================================================================
             seconds_into_sub_interval = elapsed_secs % MARKET_INTERVAL_SECONDS
-            TRADE_WINDOW_START = 780   # 13 minutes in
+            TRADE_WINDOW_START = 740   # 13 minutes in
             TRADE_WINDOW_END   = 840   # 14 minutes in (60s window)
 
             if TRADE_WINDOW_START <= seconds_into_sub_interval < TRADE_WINDOW_END and trade_key != self.last_trade_time:
@@ -997,8 +997,8 @@ class IntegratedBTCStrategy(Strategy):
         # (price near $0.50) almost always lose, while trades at 1.4 shares
         # (price ~$0.71) mostly win.
         # =========================================================================
-        TREND_UP_THRESHOLD   = 0.60   # price above this → buy YES (UP)
-        TREND_DOWN_THRESHOLD = 0.40   # price below this → buy NO (DOWN)
+        TREND_UP_THRESHOLD   = 0.65   # price above this → buy YES (UP)
+        TREND_DOWN_THRESHOLD = 0.35   # price below this → buy NO (DOWN)
 
         price_float = float(current_price)
 
