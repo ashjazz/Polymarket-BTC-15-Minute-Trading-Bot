@@ -2,6 +2,7 @@
 Risk Engine
 Manages position sizing, risk limits, and portfolio constraints
 """
+import os
 from decimal import Decimal
 from datetime import datetime
 from typing import Optional, Dict, Any, List
@@ -65,13 +66,14 @@ class RiskEngine:
         Args:
             limits: Risk limits configuration
         """
-        # Default conservative limits with $1 max per trade
+        # Default conservative limits - max position from env (default $5)
+        default_max_position = Decimal(os.getenv("MARKET_BUY_USD", "5.0"))
         self.limits = limits or RiskLimits(
-            max_position_size=Decimal("1.0"),  # $1 max per position
-            max_total_exposure=Decimal("10.0"),  # $10 total
+            max_position_size=default_max_position,  # Max per position (configurable via env)
+            max_total_exposure=Decimal("50.0"),  # $50 total
             max_positions=5,
             max_drawdown_pct=0.15,  # 15% max drawdown
-            max_loss_per_day=Decimal("5.0"),  # $5 daily loss limit
+            max_loss_per_day=Decimal("25.0"),  # $25 daily loss limit
             max_leverage=1.0,
         )
         
@@ -110,7 +112,7 @@ class RiskEngine:
         Returns:
             (is_valid, error_message)
         """
-        # Check position size limit ($1 max)
+        # Check position size limit
         if size > self.limits.max_position_size:
             return False, f"Position size ${size} exceeds max ${self.limits.max_position_size}"
         
@@ -146,33 +148,34 @@ class RiskEngine:
         risk_percent: float = 0.02,
     ) -> Decimal:
         """
-        Calculate optimal position size with $1 cap.
-        
+        Calculate optimal position size with configurable cap.
+
         Args:
             signal_confidence: Signal confidence (0.0-1.0)
             signal_score: Signal score (0-100)
             current_price: Current market price
             risk_percent: Percentage of capital to risk
-            
+
         Returns:
-            Position size in USD (capped at $1.00)
+            Position size in USD (capped at MARKET_BUY_USD)
         """
         # Base position size (% of capital)
         risk_amount = self._current_balance * Decimal(str(risk_percent))
-        
+
         # Scale by signal strength
         strength_multiplier = Decimal(str(signal_confidence)) * Decimal(str(signal_score / 100))
-        
+
         # Calculate position size
         position_size = risk_amount * strength_multiplier
-        
-        # ENFORCE $1 MAXIMUM
-        if position_size > Decimal("1.0"):
-            logger.info(f"Capping position size from ${float(position_size):.2f} to $1.00")
-            position_size = Decimal("1.0")
-        
-        # Ensure at least $1 (for simulation, in live you might want higher minimum)
-        position_size = max(position_size, Decimal("1.0"))
+
+        # ENFORCE CONFIGURABLE MAXIMUM
+        max_position = self.limits.max_position_size
+        if position_size > max_position:
+            logger.info(f"Capping position size from ${float(position_size):.2f} to ${max_position}")
+            position_size = max_position
+
+        # Ensure at least minimum (from env)
+        position_size = max(position_size, max_position)
         
         logger.info(
             f"Calculated position size: ${position_size:.2f} "

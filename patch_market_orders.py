@@ -39,8 +39,8 @@ def apply_market_order_patch():
         from nautilus_trader.common.enums import LogColor
         from py_clob_client.client import MarketOrderArgs, PartialCreateOrderOptions
 
-        # --- Read USD amount from environment (default $1) ---
-        _DEFAULT_USD_AMOUNT = float(os.getenv("MARKET_BUY_USD", "1.0"))
+        # --- Read USD amount from environment (default $5) ---
+        _DEFAULT_USD_AMOUNT = float(os.getenv("MARKET_BUY_USD", "5.0"))
         logger.info(f"Market BUY USD amount configured to: ${_DEFAULT_USD_AMOUNT:.2f}")
 
         async def _patched_submit_market_order(self, command, instrument):

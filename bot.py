@@ -298,7 +298,7 @@ class IntegratedBTCStrategy(Strategy):
         logger.info("  Phase 5: Risk engine ready")
         logger.info("  Phase 6: Performance tracking ready")
         logger.info("  Phase 7: Learning engine ready")
-        logger.info("  $1 per trade maximum")
+        logger.info(f"  ${os.getenv('MARKET_BUY_USD', '5.00')} per trade maximum (configurable via MARKET_BUY_USD)")
         logger.info("=" * 80)
 
     # ------------------------------------------------------------------
@@ -934,9 +934,9 @@ class IntegratedBTCStrategy(Strategy):
         """
         Make trading decision using our 7-phase system.
 
-        Position size is always $1.00 — no variable sizing, no risk-engine
-        calculation needed. The risk engine is still used to check that we
-        don't already have too many open positions.
+        Position size is configurable via MARKET_BUY_USD env variable (default $5.00).
+        No variable sizing, no risk-engine calculation needed.
+        The risk engine is still used to check that we don't already have too many open positions.
         """
         # --- Mode check ---
         is_simulation = await self.check_simulation_mode()
@@ -980,8 +980,8 @@ class IntegratedBTCStrategy(Strategy):
             f"(score={fused.score:.1f}, confidence={fused.confidence:.2%})"
         )
 
-        # --- Phase 5: Position size is always exactly $1.00 ---
-        POSITION_SIZE_USD = Decimal("1.00")
+        # --- Phase 5: Position size from environment (default $5.00) ---
+        POSITION_SIZE_USD = Decimal(os.getenv("MARKET_BUY_USD", "5.00"))
 
         # =========================================================================
         # TREND FILTER — replaces signal-based direction at the late trade window
@@ -1031,7 +1031,7 @@ class IntegratedBTCStrategy(Strategy):
             logger.warning(f"Risk engine blocked trade: {error}")
             return
 
-        logger.info(f"Position size: $1.00 (fixed) | Direction: {direction.upper()}")
+        logger.info(f"Position size: ${POSITION_SIZE_USD} (from MARKET_BUY_USD) | Direction: {direction.upper()}")
 
         # --- Liquidity guard: don't place if market has no real depth ---
         # The current bid/ask come from the last processed quote tick.
@@ -1410,7 +1410,7 @@ def run_integrated_bot(simulation: bool = False, enable_grafana: bool = True, te
     print(f"  Initial Mode: {'SIMULATION' if simulation else 'LIVE TRADING'}")
     print(f"  Redis Control: {'Enabled' if redis_client else 'Disabled'}")
     print(f"  Grafana: {'Enabled' if enable_grafana else 'Disabled'}")
-    print(f"  Max Trade Size: ${os.getenv('MARKET_BUY_USD', '1.00')}")
+    print(f"  Max Trade Size: ${os.getenv('MARKET_BUY_USD', '5.00')} (configurable via MARKET_BUY_USD)")
     print(f"  Quote stability gate: {QUOTE_STABILITY_REQUIRED} valid ticks")
     print()
 
