@@ -29,16 +29,21 @@ import random
 #
 # 你可以在 .env 文件中设置:
 #   PROXY_URL=http://localhost:8001
-#   或者直接在此设置
+#   如果不设置或留空，则不使用代理，直接连接
 # =============================================================================
 
-PROXY_URL = os.getenv("PROXY_URL", "http://localhost:8001")
+PROXY_URL = os.getenv("PROXY_URL", "").strip()
 if PROXY_URL:
     os.environ["HTTP_PROXY"] = PROXY_URL
     os.environ["HTTPS_PROXY"] = PROXY_URL
     os.environ["ALL_PROXY"] = PROXY_URL
     print(f"[PROXY] 已配置代理: {PROXY_URL}")
     print("[PROXY] 注意: NautilusTrader WebSocket 可能需要系统级代理")
+else:
+    # 清除可能存在的代理环境变量，确保直连
+    for key in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]:
+        os.environ.pop(key, None)
+    print("[PROXY] 未配置代理，使用直连模式")
 
 # Add project to path
 project_root = Path(__file__).parent
