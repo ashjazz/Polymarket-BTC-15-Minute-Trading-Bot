@@ -259,12 +259,24 @@ class ProxyWebSocketClient:
                 break
 
     async def _health_check_loop(self) -> None:
-        """健康检查循环 - 检测长时间无数据"""
+        """健康检查循环 - 检测长时间无数据
+
+        注意: USER channel 只在有订单活动时才推送数据，所以不适用空闲超时检测。
+        对于 USER channel，只依赖心跳检测（PING/PONG）来判断连接健康状态。
+        """
+        # USER channel 不需要空闲超时检测，因为它正常情况下可能长时间没有数据
+        is_user_channel = "/ws/user" in self._ws_url
+
         while self._state == ConnectionState.CONNECTED:
             try:
                 await asyncio.sleep(self._idle_timeout / 2)  # 检查频率是超时的一半
 
                 if not self.is_active():
+                    continue
+
+                # USER channel 跳过空闲超时检测，只依赖心跳
+                if is_user_channel:
+                    logger.debug(f"[WS] USER channel - 跳过空闲检测，依赖心跳")
                     continue
 
                 current_time = time.time()
