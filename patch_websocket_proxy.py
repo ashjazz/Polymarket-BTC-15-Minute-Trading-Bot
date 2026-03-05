@@ -588,6 +588,18 @@ def apply_websocket_proxy_patch():
                 proxy_info = f" (代理: {PROXY_URL})" if PROXY_URL else " (直连)"
                 self._log.info(f"Connected to {self._ws_url}{proxy_info}")
 
+                # =========================================================================
+                # 修复：等待 WebSocket 连接完全稳定后再订阅
+                # 避免竞态条件：后台任务（_receive_loop等）还未完全启动
+                # 就尝试发送订阅消息导致 "WebSocket 未连接" 错误
+                # =========================================================================
+                await asyncio.sleep(0.3)  # 等待后台任务启动
+
+                # 再次检查连接状态
+                if not enhanced_client.is_active():
+                    self._log.warning(f"WebSocket 连接不稳定，等待 1 秒后重试订阅...")
+                    await asyncio.sleep(1.0)
+
                 await self._subscribe_all()
 
             except Exception as e:
