@@ -997,8 +997,8 @@ class IntegratedBTCStrategy(Strategy):
         # (price near $0.50) almost always lose, while trades at 1.4 shares
         # (price ~$0.71) mostly win.
         # =========================================================================
-        TREND_UP_THRESHOLD   = 0.65   # price above this → buy YES (UP)
-        TREND_DOWN_THRESHOLD = 0.35   # price below this → buy NO (DOWN)
+        TREND_UP_THRESHOLD   = 0.62   # price above this → buy YES (UP)
+        TREND_DOWN_THRESHOLD = 0.38   # price below this → buy NO (DOWN)
 
         price_float = float(current_price)
 
@@ -1424,7 +1424,8 @@ def run_integrated_bot(simulation: bool = False, enable_grafana: bool = True, te
     unix_interval_start = (int(now.timestamp()) // 900) * 900  # current 15-min boundary
 
     btc_slugs = []
-    for i in range(0, 3):  # include 1 prior interval (in case we're just after boundary)
+    # 预加载 194 个市场（约 48 小时），避免自动更新导致订阅中断
+    for i in range(-1, 193):  # include 1 prior interval + 192 future intervals (~48 hours)
         timestamp = unix_interval_start + (i * 900)
         btc_slugs.append(f"btc-updown-15m-{timestamp}")
 
@@ -1458,6 +1459,8 @@ def run_integrated_bot(simulation: bool = False, enable_grafana: bool = True, te
         # WebSocket connection settings
         ws_connection_initial_delay_secs=10.0,  # Increased from 5s
         ws_connection_delay_secs=1.0,  # Increased from 0.1s
+        # 禁用自动更新市场，避免订阅中断
+        update_instruments_interval_mins=None,
     )
 
     poly_exec_cfg = PolymarketExecClientConfig(
