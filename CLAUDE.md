@@ -4,7 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A production-grade algorithmic trading bot for **Polymarket's 15-minute BTC price prediction markets**. The bot predicts whether BTC will go UP or DOWN in 15-minute intervals using a multi-signal fusion system with NautilusTrader as the execution framework.
+A production-grade algorithmic trading bot for **Polymarket's 15-minute BTC price prediction markets**. The bot uses a **Value Investing Strategy with Tiered Take-Profit**:
+
+1. **Entry**: Monitor both UP and DOWN token prices; buy when either drops into the value zone (default 0.28-0.32 USDC)
+2. **Exit**: Tiered take-profit based on time elapsed since entry (2min→0.40, 4min→0.48, 6min→0.55)
+3. **Protection**: Stop-loss at 0.20 USDC
+
+All parameters are configurable via environment variables.
 
 ## Python Environment
 
@@ -31,7 +37,7 @@ redis-server
 
 # Configure environment
 cp .env.example .env
-# Edit .env with Polymarket API credentials
+# Edit .env with Polymarket API credentials and strategy parameters
 ```
 
 ### Running the Bot
@@ -39,7 +45,7 @@ cp .env.example .env
 # Simulation mode (paper trading - default)
 python bot.py
 
-# Test mode (trades every minute for faster testing)
+# Test mode (faster intervals for testing)
 python bot.py --test-mode
 
 # Live trading (REAL MONEY)
@@ -53,111 +59,188 @@ python 15m_bot_runner.py --live
 python bot.py --no-grafana
 ```
 
-### Testing Individual Phases
-```bash
-python core/ingestion/test_ingestion.py
-python core/nautilus_core/test_nautilus.py
-python core/strategy_brain/test_strategy.py
-python scripts/test_data_sources.py
-python scripts/test_execution.py
-```
-
 ### View Paper Trades
 ```bash
 python view_paper_trades.py
 ```
 
-## Architecture: 7-Phase System
+## Trading Strategy
+
+### Value Investing + Tiered Take-Profit
 
 ```
-Phase 1: Data Sources      → External market data (Coinbase, Binance, Fear & Greed)
-Phase 2: Ingestion         → Unified adapter, WebSocket manager, validators
-Phase 3: Nautilus Core     → Trading framework, data engine, event dispatcher
-Phase 4: Strategy Brain    → Signal processors + Fusion engine
-Phase 5: Execution         → Order placement, risk management
-Phase 6: Monitoring        → Performance tracking, Grafana metrics
-Phase 7: Learning          → Weight optimization based on performance
+┌─────────────────────────────────────────────────────────────────────┐
+│                        15-Minute Market Cycle                        │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  ┌──────────────┐                                                   │
+│  │  BUY WINDOW  │  Market Open (T0)                                 │
+│  │  0-8 min     │  ├─ Monitor UP & DOWN prices                      │
+│  │              │  ├─ If price in 0.28-0.32 → BUY 2 USDC            │
+│  │              │  └─ One position per market only                  │
+│  └──────────────┘                                                   │
+│         │                                                           │
+│         ▼                                                           │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │                 TIERED TAKE-PROFIT                            │  │
+│  │                                                               │  │
+│  │  T+2min ──► Price ≥ 0.40? ──► YES ──► SELL ALL (+33%)        │  │
+│  │              │                    │                           │  │
+│  │              NO                   ▼                           │  │
+│  │              │              Position Closed                   │  │
+│  │              ▼                                                 │  │
+│  │  T+4min ──► Price ≥ 0.48? ──► YES ──► SELL ALL (+60%)        │  │
+│  │              │                    │                           │  │
+│  │              NO                   ▼                           │  │
+│  │              ▼              Position Closed                   │  │
+│  │  T+6min ──► Price ≥ 0.55? ──► YES ──► SELL ALL (+83%)        │  │
+│  │              │                    │                           │  │
+│  │              NO                   ▼                           │  │
+│  │              ▼              Position Closed                   │  │
+│  │         Hold until market end                                  │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│                                                                      │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │  STOP-LOSS: Any time, Price ≤ 0.20 → SELL ALL (-33%)         │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-### Key Components
+### Strategy Logic
 
-**Entry Point:** `bot.py` - Main `IntegratedBTCStrategy` class extending NautilusTrader's `Strategy`
+| Phase | Condition | Action | Expected Return |
+|-------|-----------|--------|-----------------|
+| **Entry** | UP or DOWN price in 0.28-0.32 | Buy 2 USDC | - |
+| **TP1** | T+2min, price ≥ 0.40 | Sell all | +33% |
+| **TP2** | T+4min, price ≥ 0.48 | Sell all | +60% |
+| **TP3** | T+6min, price ≥ 0.55 | Sell all | +83% |
+| **Stop** | Any time, price ≤ 0.20 | Sell all | -33% |
 
-**Signal Processors (Phase 4):**
-- `SpikeDetectionProcessor` - Detects price spikes vs historical average
-- `SentimentProcessor` - Uses Fear & Greed Index extremes
-- `PriceDivergenceProcessor` - Compares Polymarket price to spot BTC
-- `OrderBookImbalanceProcessor` - Analyzes CLOB order book depth
-- `TickVelocityProcessor` - Measures price change velocity
-- `DeribitPCRProcessor` - Institutional sentiment from options PCR
+### Key Rules
 
-**Signal Fusion (Phase 4):** `core/strategy_brain/fusion_engine/signal_fusion.py`
-- Weighted voting system combining all signals
-- Default weights: OrderBookImbalance(30%), TickVelocity(25%), PriceDivergence(18%), SpikeDetection(12%), DeribitPCR(10%), Sentiment(5%)
-
-**Risk Management (Phase 5):** `execution/risk_engine.py`
-- Max $1 per trade (hard cap)
-- 30% stop loss, 20% take profit
-- Max 5 concurrent positions
-- 15% max drawdown circuit breaker
-
-## Trading Logic
-
-The bot trades in a **late-window strategy** (minutes 13-14 of each 15-min market):
-- Uses a **trend filter** at the late window instead of signal-based direction
-- `price > 0.60` → Buy YES (UP)
-- `price < 0.40` → Buy NO (DOWN)
-- `0.40-0.60` → Skip (coin flip territory)
-
-Rationale: At minute 13, the Polymarket price reflects the nearly-decided outcome. This is not prediction but reading the trend.
+1. **Dual Monitoring**: Watch both UP (YES) and DOWN (NO) tokens simultaneously
+2. **First-to-Trigger**: Buy whichever token hits the entry zone first
+3. **One Position Per Market**: No pyramiding within the same 15-minute cycle
+4. **Time-Based Checkpoints**: Take-profit checks happen at fixed intervals from entry time
+5. **Full Exit**: All exits are full position closes (no partial exits)
 
 ## Configuration
 
-Environment variables (`.env`):
-```
+All strategy parameters are configurable via `.env` file:
+
+```bash
+# Polymarket API Credentials
 POLYMARKET_PK=your_private_key
 POLYMARKET_API_KEY=your_api_key
 POLYMARKET_API_SECRET=your_api_secret
 POLYMARKET_PASSPHRASE=your_passphrase
+
+# Redis (for mode switching)
 REDIS_HOST=localhost
 REDIS_PORT=6379
 REDIS_DB=2
-MAX_POSITION_SIZE=1.0
-STOP_LOSS_PCT=0.30
-TAKE_PROFIT_PCT=0.20
+
+# ─────────────────────────────────────────────
+# STRATEGY PARAMETERS (All Configurable)
+# ─────────────────────────────────────────────
+
+# Entry Conditions
+ENTRY_PRICE_LOW=0.28          # Buy when price ≤ this
+ENTRY_PRICE_HIGH=0.32         # Buy when price ≥ this (defines range)
+POSITION_SIZE_USD=2.0         # Amount to buy per trade (USDC)
+BUY_WINDOW_MINUTES=8          # Minutes after market open to allow buys
+
+# Take-Profit Targets (Tiered)
+TAKE_PROFIT_1_MINUTES=2       # First checkpoint: 2 minutes after entry
+TAKE_PROFIT_1_PRICE=0.40      # First target price (+33%)
+
+TAKE_PROFIT_2_MINUTES=4       # Second checkpoint: 4 minutes after entry
+TAKE_PROFIT_2_PRICE=0.48      # Second target price (+60%)
+
+TAKE_PROFIT_3_MINUTES=6       # Third checkpoint: 6 minutes after entry
+TAKE_PROFIT_3_PRICE=0.55      # Third target price (+83%)
+
+# Stop Loss
+STOP_LOSS_PRICE=0.20          # Exit if price drops to this (-33%)
+```
+
+## Architecture
+
+```
+bot.py                          # Main entry point, strategy implementation
+├── patch_gamma_markets.py      # Polymarket API patches (apply before imports)
+├── patch_market_orders.py      # Market order handling patches
+│
+├── core/
+│   └── strategy_brain/         # Strategy logic (to be refactored)
+│
+├── execution/
+│   └── risk_engine.py          # Position management, risk limits
+│
+├── monitoring/
+│   └── performance_tracker.py  # Trade logging, P&L tracking
+│
+├── data_sources/               # External data providers
+│   ├── coinbase/               # BTC spot price
+│   └── news_social/            # Fear & Greed Index
+│
+└── specs/                      # Strategy specifications
+    └── 001-value-investing-strategy/
+        └── spec.md             # Full strategy specification
 ```
 
 ## Important Files
 
 | File | Purpose |
 |------|---------|
-| `bot.py` | Main strategy implementation |
+| `bot.py` | Main strategy implementation (to be refactored for new strategy) |
+| `specs/001-value-investing-strategy/spec.md` | Complete strategy specification |
 | `patch_gamma_markets.py` | Polymarket API patches (must apply before imports) |
 | `patch_market_orders.py` | Market order handling patches |
 | `execution/risk_engine.py` | Position sizing, risk limits |
-| `core/strategy_brain/fusion_engine/signal_fusion.py` | Signal combination logic |
-| `feedback/learning_engine.py` | Weight optimization from trade history |
-| `monitoring/performance_tracker.py` | Trade logging, Sharpe ratio, equity curve |
-
-## Singleton Pattern
-
-Most components use singletons accessed via `get_X()` functions:
-- `get_fusion_engine()` - Signal fusion
-- `get_risk_engine()` - Risk management
-- `get_performance_tracker()` - Trade tracking
-- `get_learning_engine()` - Weight optimization
+| `monitoring/performance_tracker.py` | Trade logging, equity curve |
 
 ## Key Constraints
 
-1. **Always $1 per trade** - Position size is fixed, not variable
-2. **15-minute market alignment** - Market slugs are Unix timestamps aligned to 15-min boundaries
-3. **YES/NO token pairing** - Each market has two tokens; YES=UP, NO=DOWN
-4. **IOC orders only** - Immediate-or-cancel for market orders
-5. **Polymarket CLOB** - Uses py_clob_client for order book data
+1. **Fixed Position Size**: Each trade is exactly `POSITION_SIZE_USD` (default 2 USDC)
+2. **15-minute Market Alignment**: Market slugs are Unix timestamps aligned to 15-min boundaries
+3. **YES/NO Token Pairing**: Each market has two tokens; YES=UP, NO=DOWN
+4. **IOC Orders Only**: Immediate-or-cancel for market orders
+5. **Polymarket CLOB**: Uses py_clob_client for order book data
+6. **One Position Per Market**: No multiple positions in the same 15-minute cycle
+
+## Position State Management
+
+Each active position tracks:
+- `market_slug`: Which 15-minute market
+- `direction`: UP (YES) or DOWN (NO)
+- `entry_price`: Price at which position was opened
+- `entry_time`: Timestamp of entry (T0, used for checkpoint calculations)
+- `size_usd`: Position size in USDC
+- `status`: OPEN, CLOSED_TP1, CLOSED_TP2, CLOSED_TP3, CLOSED_SL, CLOSED_EOD
 
 ## Common Issues
 
-- **"No liquidity" rejection**: Market orderbook is empty; bot will retry next tick
+- **"No liquidity" rejection**: Market orderbook is empty; bot will retry
 - **Market not found**: Ensure slug filters match current 15-min intervals
 - **Redis connection failed**: Bot falls back to static mode from .env
 - **Gamma markets patch required**: Must apply before importing NautilusTrader
+- **Position not closed**: Check if take-profit targets were met at checkpoint times
+
+## Development Notes
+
+### Current Status
+The codebase is being refactored from a "late-window trend following" strategy to the new "value investing + tiered take-profit" strategy. See `specs/001-value-investing-strategy/spec.md` for the complete specification.
+
+### Refactoring Priorities
+1. Implement dual price monitoring (UP and DOWN simultaneously)
+2. Implement value zone entry logic with configurable parameters
+3. Implement tiered take-profit with time-based checkpoints
+4. Implement continuous stop-loss monitoring
+5. Update position state tracking for new exit types
+
+### Testing
+- Use `--test-mode` for faster iteration during development
+- Simulation mode (`python bot.py`) for paper trading validation
+- Always test configuration changes in simulation before live trading
