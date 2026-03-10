@@ -11,7 +11,7 @@
 ## 任务清单
 
 ### T014 编写出场逻辑单元测试
-- [ ] T014 [P] 创建 `tests/test_exit_logic.py`，测试止盈和止损逻辑
+- [X] T014 [P] 创建 `tests/test_exit_logic.py`，测试止盈和止损逻辑
 
 **文件**: `tests/test_exit_logic.py`
 
@@ -254,7 +254,7 @@ class TestGetNextCheckpoint:
 ---
 
 ### T015 集成策略模块到 bot.py
-- [ ] T015 重构 `bot.py`，集成新的策略模块
+- [~] T015 重构 `bot.py`，集成新的策略模块（保持独立状态）
 
 **文件**: `bot.py`
 
@@ -326,7 +326,7 @@ def on_quote_tick(self, tick):
 ---
 
 ### T016 简化 risk_engine.py
-- [ ] T016 简化 `execution/risk_engine.py`，移除不需要的风控逻辑
+- [~] T016 简化 `execution/risk_engine.py`，移除不需要的风控逻辑（策略模块保持独立状态）
 
 **文件**: `execution/risk_engine.py`
 
@@ -353,7 +353,7 @@ def on_quote_tick(self, tick):
 ---
 
 ### T018 创建集成测试
-- [ ] T018 创建 `tests/test_integration.py`，测试完整的策略流程
+- [X] T018 创建 `tests/test_integration.py`，测试完整的策略流程
 
 **文件**: `tests/test_integration.py`
 
@@ -490,7 +490,7 @@ class TestFullStrategyFlow:
 ---
 
 ### T019 运行完整测试套件
-- [ ] T019 运行所有测试，确保通过
+- [X] T019 运行所有测试，确保通过
 
 **验证命令**:
 ```bash
@@ -505,11 +505,11 @@ python -m pytest tests/ -v --cov=strategy --cov-report=term-missing
 
 ## 阶段验收标准
 
-- [ ] 所有单元测试通过
-- [ ] 所有集成测试通过
-- [ ] `bot.py` 成功导入新策略模块
-- [ ] `risk_engine.py` 简化完成
-- [ ] `.env.example` 包含所有配置参数
+- [X] 所有单元测试通过
+- [X] 所有集成测试通过
+- [~] `bot.py` 成功导入新策略模块（策略模块保持独立状态）
+- [~] `risk_engine.py` 简化完成（策略模块保持独立状态）
+- [X] `.env.example` 包含所有配置参数
 
 ---
 

@@ -22,7 +22,7 @@
 ## 任务清单
 
 ### T013 编写入场逻辑单元测试
-- [ ] T013 [P] 创建 `tests/test_entry_logic.py`，测试入场条件判断
+- [X] T013 [P] 创建 `tests/test_entry_logic.py`，测试入场条件判断
 
 **文件**: `tests/test_entry_logic.py`
 
