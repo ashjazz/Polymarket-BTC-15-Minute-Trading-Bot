@@ -11,7 +11,7 @@
 ## 任务清单
 
 ### T001 [P] 创建 strategy 模块目录结构
-- [ ] T001 [P] 创建 `strategy/__init__.py` 文件，定义模块初始化
+- [X] T001 [P] 创建 `strategy/__init__.py` 文件，定义模块初始化
 
 **文件**: `strategy/__init__.py`
 
@@ -51,14 +51,14 @@ __all__ = [
 ---
 
 ### T002 [P] 创建 tests 目录结构
-- [ ] T002 [P] 创建 `tests/__init__.py` 文件（空文件即可）
+- [X] T002 [P] 创建 `tests/__init__.py` 文件（空文件即可）
 
 **文件**: `tests/__init__.py`
 
 ---
 
 ### T003 [P] 更新 .env.example 添加策略参数
-- [ ] T003 [P] 更新 `.env.example` 文件，添加所有策略配置参数
+- [X] T003 [P] 更新 `.env.example` 文件，添加所有策略配置参数
 
 **文件**: `.env.example`
 
@@ -89,7 +89,7 @@ STOP_LOSS_PRICE=0.20          # 止损价格
 ---
 
 ### T004 验证目录结构
-- [ ] T004 确认目录结构已正确创建
+- [X] T004 确认目录结构已正确创建
 
 **验证命令**:
 ```bash
@@ -102,10 +102,10 @@ cat .env.example | grep -A 20 "VALUE INVESTING"
 
 ## 阶段验收标准
 
-- [ ] `strategy/__init__.py` 存在
-- [ ] `tests/__init__.py` 存在
-- [ ] `.env.example` 包含所有策略参数
-- [ ] 目录结构与 plan.md 一致
+- [X] `strategy/__init__.py` 存在
+- [X] `tests/__init__.py` 存在
+- [X] `.env.example` 包含所有策略参数
+- [X] 目录结构与 plan.md 一致
 
 ---
 

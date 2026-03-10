@@ -13,7 +13,7 @@
 ## 任务清单
 
 ### T007 实现 Position 数据类
-- [ ] T007 [P] 创建 `strategy/position.py`，定义持仓状态枚举和 Position 数据类
+- [X] T007 [P] 创建 `strategy/position.py`，定义持仓状态枚举和 Position 数据类
 
 **文件**: `strategy/position.py`
 
@@ -163,7 +163,7 @@ class Position:
 ---
 
 ### T008 实现 TokenPrice 和 MarketState 数据类
-- [ ] T008 [P] 创建 `strategy/market_state.py`，定义代币价格快照和市场状态
+- [X] T008 [P] 创建 `strategy/market_state.py`，定义代币价格快照和市场状态
 
 **文件**: `strategy/market_state.py`
 
@@ -333,7 +333,7 @@ class MarketState:
 ---
 
 ### T009 编写 Position 单元测试
-- [ ] T009 [P] 创建 `tests/test_position.py`，测试持仓状态管理
+- [X] T009 [P] 创建 `tests/test_position.py`，测试持仓状态管理
 
 **文件**: `tests/test_position.py`
 
@@ -485,7 +485,7 @@ class TestPosition:
 ---
 
 ### T010 编写 MarketState 单元测试
-- [ ] T010 [P] 创建 `tests/test_market_state.py`，测试市场状态管理
+- [X] T010 [P] 创建 `tests/test_market_state.py`，测试市场状态管理
 
 **文件**: `tests/test_market_state.py`
 
@@ -626,12 +626,12 @@ class TestMarketState:
 
 ## 阶段验收标准
 
-- [ ] `strategy/position.py` 文件存在
-- [ ] `strategy/market_state.py` 文件存在
-- [ ] `Position` 类正确计算盈亏和持有时间
-- [ ] `TokenPrice` 类正确计算中间价和价差
-- [ ] `MarketState` 类正确管理价格和检查点状态
-- [ ] 所有单元测试通过
+- [X] `strategy/position.py` 文件存在
+- [X] `strategy/market_state.py` 文件存在
+- [X] `Position` 类正确计算盈亏和持有时间
+- [X] `TokenPrice` 类正确计算中间价和价差
+- [X] `MarketState` 类正确管理价格和检查点状态
+- [X] 所有单元测试通过
 
 ---
 

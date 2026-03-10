@@ -13,7 +13,7 @@
 ## 任务清单
 
 ### T005 实现 StrategyConfig 数据类
-- [ ] T005 创建 `strategy/config.py`，实现配置加载和验证
+- [X] T005 创建 `strategy/config.py`，实现配置加载和验证
 
 **文件**: `strategy/config.py`
 
@@ -150,7 +150,7 @@ class StrategyConfig:
 ---
 
 ### T006 编写配置模块单元测试
-- [ ] T006 [P] 创建 `tests/test_config.py`，测试配置加载和验证
+- [X] T006 [P] 创建 `tests/test_config.py`，测试配置加载和验证
 
 **文件**: `tests/test_config.py`
 
@@ -282,12 +282,12 @@ class TestStrategyConfig:
 
 ## 阶段验收标准
 
-- [ ] `strategy/config.py` 文件存在
-- [ ] `StrategyConfig` 类可以从环境变量加载所有参数
-- [ ] `validate()` 方法正确验证配置
-- [ ] `is_entry_price()` 方法正确判断入场区间
-- [ ] `is_in_buy_window()` 方法正确判断买入窗口
-- [ ] 单元测试通过：`python -m pytest tests/test_config.py -v`
+- [X] `strategy/config.py` 文件存在
+- [X] `StrategyConfig` 类可以从环境变量加载所有参数
+- [X] `validate()` 方法正确验证配置
+- [X] `is_entry_price()` 方法正确判断入场区间
+- [X] `is_in_buy_window()` 方法正确判断买入窗口
+- [X] 单元测试通过：`python -m pytest tests/test_config.py -v`
 
 ---
 
