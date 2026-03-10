@@ -13,7 +13,7 @@
 ## 任务清单
 
 ### T012 实现 ExitSignal 和止盈逻辑
-- [ ] T012 创建 `strategy/exit_logic.py`，实现出场信号和止盈检查函数
+- [X] T012 创建 `strategy/exit_logic.py`，实现出场信号和止盈检查函数
 
 **文件**: `strategy/exit_logic.py`
 

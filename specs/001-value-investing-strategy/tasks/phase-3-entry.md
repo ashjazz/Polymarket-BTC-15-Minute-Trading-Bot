@@ -13,7 +13,7 @@
 ## 任务清单
 
 ### T011 实现 EntrySignal 和入场逻辑
-- [ ] T011 创建 `strategy/entry_logic.py`，实现入场信号和检查函数
+- [X] T011 创建 `strategy/entry_logic.py`，实现入场信号和检查函数
 
 **文件**: `strategy/entry_logic.py`
 
