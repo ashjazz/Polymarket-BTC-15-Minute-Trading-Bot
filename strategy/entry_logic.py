@@ -6,6 +6,7 @@
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Optional
+from datetime import datetime, timezone
 from loguru import logger
 
 from strategy.config import StrategyConfig
@@ -20,6 +21,22 @@ class EntrySignal:
     price: Decimal               # 入场价格（中间价）
     reason: str                  # 触发原因
     token_type: str              # "YES" 或 "NO"
+
+
+# 日志节流：记录上次打印日志的时间，避免刷屏
+_last_log_times: dict = {}
+LOG_THROTTLE_SECONDS = 30  # 同一市场同一原因的日志间隔至少 30 秒
+
+
+def _should_log(market_slug: str, reason: str) -> bool:
+    """检查是否应该打印日志（节流机制）"""
+    key = f"{market_slug}:{reason}"
+    now = datetime.now(timezone.utc)
+    last_time = _last_log_times.get(key)
+    if last_time is None or (now - last_time).total_seconds() >= LOG_THROTTLE_SECONDS:
+        _last_log_times[key] = now
+        return True
+    return False
 
 
 def check_entry(
@@ -48,15 +65,16 @@ def check_entry(
     """
     # 检查是否已有持仓
     if market_state.has_position:
-        logger.debug(f"[ENTRY] 市场已有持仓，跳过入场检查: {market_state.market_slug}")
         return None
 
     # 检查是否在买入窗口内
     minutes_since_open = market_state.minutes_since_open
     if not config.is_in_buy_window(minutes_since_open):
-        logger.debug(
-            f"[ENTRY] 超出买入窗口: {minutes_since_open:.1f}min >= {config.buy_window_minutes}min"
-        )
+        # 只在首次超出窗口时打印一次日志（节流）
+        if _should_log(market_state.market_slug, "outside_window"):
+            logger.debug(
+                f"[ENTRY] 超出买入窗口: {minutes_since_open:.1f}min >= {config.buy_window_minutes}min"
+            )
         return None
 
     # 检查 YES 代币价格
