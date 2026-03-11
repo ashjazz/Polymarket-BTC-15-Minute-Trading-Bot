@@ -927,6 +927,10 @@ class IntegratedBTCStrategy(Strategy):
             # STEP 3: Check for ENTRY if we don't have a position
             # =========================================================================
             else:
+                # Double-check: ensure no position exists (race condition protection)
+                if market_state.has_position:
+                    return
+
                 # Check entry conditions (both YES and NO prices)
                 entry_signal = check_entry(
                     yes_price=market_state.yes_price,
@@ -936,6 +940,17 @@ class IntegratedBTCStrategy(Strategy):
                 )
 
                 if entry_signal:
+                    # CRITICAL: Mark position as pending IMMEDIATELY to prevent duplicate entries
+                    # This creates a placeholder position to block subsequent entry signals
+                    pending_position = Position(
+                        market_slug=market_state.market_slug,
+                        direction=entry_signal.direction,
+                        entry_price=entry_signal.price,
+                        entry_time=now,  # Use current time
+                        size_usd=self.strategy_config.position_size_usd,
+                    )
+                    market_state.current_position = pending_position
+
                     logger.info(format_entry_log(entry_signal, self.strategy_config, slug))
                     self.run_in_executor(
                         lambda: self._handle_entry_signal_sync(
@@ -965,22 +980,16 @@ class IntegratedBTCStrategy(Strategy):
         """
         Handle entry signal from the new strategy module.
 
-        Creates a Position and executes the buy order.
+        Executes the buy order. Position is already created in on_quote_tick.
         """
         # Check simulation mode
         is_simulation = await self.check_simulation_mode()
 
-        # Create Position object
-        position = Position(
-            market_slug=market_state.market_slug,
-            direction=signal.direction,
-            entry_price=signal.price,
-            entry_time=datetime.now(timezone.utc),
-            size_usd=self.strategy_config.position_size_usd,
-        )
-
-        # Store position in MarketState
-        market_state.current_position = position
+        # Use the existing position (created in on_quote_tick to prevent race conditions)
+        position = market_state.current_position
+        if not position:
+            logger.error("No position found in MarketState - this should not happen!")
+            return
 
         logger.info("=" * 80)
         logger.info(f"[{'SIMULATION' if is_simulation else 'LIVE'}] 入场执行")
