@@ -108,6 +108,19 @@ from execution.risk_engine import get_risk_engine
 from monitoring.performance_tracker import get_performance_tracker
 from monitoring.grafana_exporter import get_grafana_exporter
 from feedback.learning_engine import get_learning_engine
+
+# =============================================================================
+# NEW STRATEGY MODULE - 价值投资 + 多目标价止盈策略
+# =============================================================================
+from strategy import (
+    StrategyConfig,
+    Position, PositionStatus, PositionDirection,
+    MarketState, TokenPrice,
+    check_entry, EntrySignal, should_skip_entry, format_entry_log,
+    check_exit, check_take_profit, check_stop_loss,
+    ExitSignal, format_exit_log,
+)
+
 load_dotenv()
 from patch_market_orders import apply_market_order_patch
 patch_applied = apply_market_order_patch()
@@ -211,7 +224,7 @@ class IntegratedBTCStrategy(Strategy):
         self._stable_tick_count = 0
         self._market_stable = False
         self._last_instrument_switch = None
-        
+
         # =========================================================================
         # FIX 1: Force first trade by setting last_trade_time to -1
         # =========================================================================
@@ -225,6 +238,22 @@ class IntegratedBTCStrategy(Strategy):
 
         # YES token id for the current market (set in _load_all_btc_instruments)
         self._yes_token_id: Optional[str] = None
+
+        # =========================================================================
+        # NEW STRATEGY MODULE - 价值投资 + 多目标价止盈策略
+        # =========================================================================
+        self.strategy_config = StrategyConfig.from_env()
+        self.market_states: Dict[str, MarketState] = {}  # key: market_slug
+
+        # Validate strategy config
+        config_errors = self.strategy_config.validate()
+        if config_errors:
+            logger.error("策略配置验证失败:")
+            for err in config_errors:
+                logger.error(f"  - {err}")
+            raise ValueError(f"Invalid strategy config: {config_errors}")
+        else:
+            logger.info(f"策略配置加载成功: {self.strategy_config}")
 
         # Phase 4: Signal Processors
         self.spike_detector = SpikeDetectionProcessor(
@@ -399,18 +428,25 @@ class IntegratedBTCStrategy(Strategy):
 
         # =========================================================================
         # FIX 3: Force subscribe to current market IMMEDIATELY
+        # NEW STRATEGY: Subscribe to BOTH YES and NO tokens for dual monitoring
         # =========================================================================
         if self.instrument_id:
+            # Subscribe to YES token (primary)
             self.subscribe_quote_ticks(self.instrument_id)
-            logger.info(f"✓ SUBSCRIBED to market: {self.instrument_id}")
-            
+            logger.info(f"✓ SUBSCRIBED to YES token: {self.instrument_id}")
+
+            # Subscribe to NO token if available
+            if self._no_instrument_id:
+                self.subscribe_quote_ticks(self._no_instrument_id)
+                logger.info(f"✓ SUBSCRIBED to NO token: {self._no_instrument_id}")
+
             # Try to get current price from cache
             try:
                 quote = self.cache.quote_tick(self.instrument_id)
                 if quote and quote.bid_price and quote.ask_price:
                     current_price = (quote.bid_price + quote.ask_price) / 2
                     self.price_history.append(current_price)
-                    logger.info(f"✓ Initial price: ${float(current_price):.4f}")
+                    logger.info(f"✓ Initial YES price: ${float(current_price):.4f}")
             except Exception as e:
                 logger.debug(f"No initial price yet: {e}")
 
@@ -428,12 +464,13 @@ class IntegratedBTCStrategy(Strategy):
             threading.Thread(target=self._start_grafana_sync, daemon=True).start()
 
         logger.info("=" * 80)
-        logger.info("Strategy active - will trade every 15 minutes")
-        logger.info(f"Price history: {len(self.price_history)} points")
-        if len(self.price_history) >= 20:
-            logger.info("✓ READY TO TRADE NOW!")
-        else:
-            logger.warning(f"⚠ Need more history ({len(self.price_history)}/20)")
+        logger.info("策略启动 - 价值投资 + 多目标价止盈策略")
+        logger.info(f"  入场区间: [{self.strategy_config.entry_price_low:.2f} - {self.strategy_config.entry_price_high:.2f}]")
+        logger.info(f"  买入窗口: 前 {self.strategy_config.buy_window_minutes} 分钟")
+        logger.info(f"  止盈目标: {', '.join([f'{p:.2f}' for p in self.strategy_config.take_profit_prices])}")
+        logger.info(f"  止损价格: {self.strategy_config.stop_loss_price:.2f}")
+        logger.info(f"  仓位大小: ${self.strategy_config.position_size_usd:.2f} USDC")
+        logger.info(f"  已监控市场: {len(self.market_states)} 个")
         logger.info("=" * 80)
 
     def _generate_synthetic_history(self, target_count: int = 20, existing_count: int = 0):
@@ -543,9 +580,22 @@ class IntegratedBTCStrategy(Strategy):
             status = "ACTIVE" if is_active else "FUTURE" if inst['time_diff_minutes'] > 0 else "PAST"
             logger.info(f"  [{i}] {inst['slug']}: {status} (starts at {inst['start_time'].strftime('%H:%M:%S')}, ends at {inst['end_time'].strftime('%H:%M:%S')})")
         logger.info("=" * 80)
-        
+
         self.all_btc_instruments = btc_instruments
-        
+
+        # =========================================================================
+        # NEW STRATEGY: Initialize MarketState for each market
+        # =========================================================================
+        for inst in btc_instruments:
+            slug = inst['slug']
+            if slug not in self.market_states:
+                self.market_states[slug] = MarketState(
+                    market_slug=slug,
+                    market_start_time=inst['start_time'],
+                    market_end_time=inst['end_time'],
+                )
+        logger.info(f"Initialized MarketState for {len(self.market_states)} markets")
+
         # Find current market and SUBSCRIBE IMMEDIATELY
         # FIXED: A market is current if it has STARTED and not yet ENDED (use end_time, not a hardcoded 15-min window)
         for i, inst in enumerate(btc_instruments):
@@ -622,7 +672,20 @@ class IntegratedBTCStrategy(Strategy):
         self._yes_token_id = next_market.get('yes_token_id')
         self._yes_instrument_id = next_market.get('yes_instrument_id', next_market['instrument'].id)
         self._no_instrument_id = next_market.get('no_instrument_id')
-        
+
+        # =========================================================================
+        # NEW STRATEGY: Ensure MarketState exists for this market
+        # =========================================================================
+        slug = next_market['slug']
+        if slug not in self.market_states:
+            self.market_states[slug] = MarketState(
+                market_slug=slug,
+                market_start_time=next_market['start_time'],
+                market_end_time=next_market['end_time'],
+            )
+        # Reset checkpoints for new market
+        self.market_states[slug].reset_checkpoints()
+
         logger.info("=" * 80)
         logger.info(f"SWITCHING TO NEXT MARKET: {next_market['slug']}")
         logger.info(f"  Current time: {now.strftime('%H:%M:%S')}")
@@ -661,6 +724,7 @@ class IntegratedBTCStrategy(Strategy):
         """
         Timer loop: checks every 10 seconds if it's time to switch markets.
         Also handles the case where we're waiting for a future market to open.
+        NEW: Handles EOD (end-of-day/market) forced liquidation.
         """
         while True:
             # --- auto-restart check ---
@@ -672,6 +736,11 @@ class IntegratedBTCStrategy(Strategy):
                 return
 
             now = datetime.now(timezone.utc)
+
+            # =========================================================================
+            # NEW STRATEGY: Check for EOD forced liquidation
+            # =========================================================================
+            await self._check_eod_liquidation(now)
 
             if self.next_switch_time and now >= self.next_switch_time:
                 if self._waiting_for_market_open:
@@ -697,15 +766,65 @@ class IntegratedBTCStrategy(Strategy):
 
             await asyncio.sleep(10)
 
+    async def _check_eod_liquidation(self, now: datetime):
+        """
+        Check all markets for EOD (market end) forced liquidation.
+
+        If a market has ended and we still have an open position, force close it.
+        """
+        for slug, market_state in self.market_states.items():
+            if not market_state.has_position:
+                continue
+
+            # Check if market has ended
+            if now >= market_state.market_end_time:
+                position = market_state.current_position
+                if not position.is_open:
+                    continue
+
+                logger.warning("=" * 80)
+                logger.warning(f"⏰ EOD 强制平仓: {slug}")
+                logger.warning(f"  市场已结束于 {market_state.market_end_time.strftime('%H:%M:%S')} UTC")
+                logger.warning("=" * 80)
+
+                # Get current price (or use last known price)
+                if position.direction == PositionDirection.UP:
+                    current_price = market_state.yes_price.mid if market_state.yes_price else position.entry_price
+                else:
+                    current_price = market_state.no_price.mid if market_state.no_price else position.entry_price
+
+                # Create EOD exit signal
+                eod_signal = ExitSignal(
+                    exit_price=current_price,
+                    exit_status=PositionStatus.CLOSED_EOD,
+                    reason="Market ended - forced liquidation",
+                    level=0,
+                )
+
+                # Handle the exit
+                await self._handle_exit_signal(eod_signal, position, market_state, current_price)
+
     # ------------------------------------------------------------------
-    # Quote tick handler - SIMPLIFIED
+    # Quote tick handler - NEW STRATEGY: 价值投资 + 多目标价止盈
     # ------------------------------------------------------------------
 
     def on_quote_tick(self, tick: QuoteTick):
-        """Handle quote tick - TRADE when market opens and at each 15-min boundary"""
+        """
+        Handle quote tick - NEW STRATEGY IMPLEMENTATION
+
+        新策略逻辑:
+        1. 更新 MarketState 中的价格（区分 YES 和 NO 代币）
+        2. 如果有持仓 → 调用 check_exit() 检查出场（止损或止盈）
+        3. 如果无持仓 → 调用 check_entry() 检查入场（价格进入价值区）
+        4. 调用对应的处理方法执行订单
+        """
         try:
-            # Only process ticks from current instrument
-            if self.instrument_id is None or tick.instrument_id != self.instrument_id:
+            # Determine which token this tick is for
+            is_yes_token = tick.instrument_id == self.instrument_id
+            is_no_token = hasattr(self, '_no_instrument_id') and self._no_instrument_id and tick.instrument_id == self._no_instrument_id
+
+            # Only process ticks from YES or NO tokens of current market
+            if not is_yes_token and not is_no_token:
                 return
 
             now = datetime.now(timezone.utc)
@@ -714,23 +833,25 @@ class IntegratedBTCStrategy(Strategy):
 
             if bid is None or ask is None:
                 return
-                
+
             try:
                 bid_decimal = bid.as_decimal()
                 ask_decimal = ask.as_decimal()
             except:
                 return
 
-            # Always store price history
             mid_price = (bid_decimal + ask_decimal) / 2
-            self.price_history.append(mid_price)
-            if len(self.price_history) > self.max_history:
-                self.price_history.pop(0)
-            
-            # Store latest bid/ask for liquidity check before order placement
+
+            # Always store price history (use YES price as primary)
+            if is_yes_token:
+                self.price_history.append(mid_price)
+                if len(self.price_history) > self.max_history:
+                    self.price_history.pop(0)
+
+            # Store latest bid/ask for liquidity check
             self._last_bid_ask = (bid_decimal, ask_decimal)
 
-            # Tick buffer for TickVelocityProcessor (rolling 90s window)
+            # Tick buffer for TickVelocityProcessor
             self._tick_buffer.append({'ts': now, 'price': mid_price})
 
             # Stability gate
@@ -742,25 +863,6 @@ class IntegratedBTCStrategy(Strategy):
                 else:
                     return
 
-            # =========================================================================
-            # FIXED TRADING LOGIC:
-            # 
-            # We trade once per 15-min market interval.
-            # Instead of checking wall-clock 15-min boundaries (which caused the 2-hour
-            # wait), we use a simple counter keyed to the Polymarket market's OWN
-            # start time.
-            #
-            # The market's start_time is stored in all_btc_instruments[current_index].
-            # Within each market, we compute a "sub-interval" index:
-            #   sub_interval = elapsed_seconds_since_market_open // 900
-            # Trade ID = (market_start_timestamp, sub_interval)
-            # This fires once at market open AND once after every 15 min within
-            # the same market if it's a multi-interval market.
-            #
-            # If _waiting_for_market_open is True (started before market opens),
-            # we block trading until the timer loop calls _switch_to_next_market.
-            # =========================================================================
-
             # Block trading if waiting for a future market to open
             if self._waiting_for_market_open:
                 return
@@ -771,64 +873,359 @@ class IntegratedBTCStrategy(Strategy):
                 return
 
             current_market = self.all_btc_instruments[self.current_instrument_index]
-            market_start_ts = current_market['market_timestamp']  # Slug timestamp = market start (Unix)
+            slug = current_market['slug']
 
-            # How many 15-min intervals have elapsed since this market opened?
-            elapsed_secs = now.timestamp() - market_start_ts
-            if elapsed_secs < 0:
-                # Market hasn't started yet — block
-                return
-
-            sub_interval = int(elapsed_secs // MARKET_INTERVAL_SECONDS)
-
-            # Unique trade key: (market_start_timestamp, sub_interval)
-            trade_key = (market_start_ts, sub_interval)
+            # Get or create MarketState
+            market_state = self.market_states.get(slug)
+            if not market_state:
+                logger.warning(f"MarketState not found for {slug}, creating...")
+                market_state = MarketState(
+                    market_slug=slug,
+                    market_start_time=current_market['start_time'],
+                    market_end_time=current_market['end_time'],
+                )
+                self.market_states[slug] = market_state
 
             # =========================================================================
-            # TRADE WINDOW: minutes 13–14 of each 15-min market (780–840 seconds in)
-            #
-            # WHY LATE IN THE MARKET:
-            #   At 13 minutes in, the UP/DOWN result is nearly decided. The price IS
-            #   the trend — if YES is at $0.78, BTC went up during this interval.
-            #   We're not predicting anymore, we're reading a nearly-resolved outcome.
-            #
-            # WHY NOT EARLIER (the old 30–90s window):
-            #   At 30 seconds in, nobody knows which way BTC will move. The signals
-            #   have no edge. This is why we were losing at prices near $0.50.
-            #
-            # TREND FILTER (applied in _make_trading_decision):
-            #   Price > 0.60 → clear UP trend → buy YES
-            #   Price < 0.40 → clear DOWN trend → buy NO
-            #   Price 0.40–0.60 → coin flip → SKIP (don't trade)
-            #
-            # Share count intuition:
-            #   1.4 shares = price $0.71 → strong trend, win rate ~71%
-            #   1.9 shares = price $0.53 → weak trend, near coin flip
-            #   2.0+ shares = price $0.50 → pure coin flip, SKIP
+            # STEP 1: Update prices in MarketState
             # =========================================================================
-            seconds_into_sub_interval = elapsed_secs % MARKET_INTERVAL_SECONDS
-            TRADE_WINDOW_START = 740   # 13 minutes in
-            TRADE_WINDOW_END   = 840   # 14 minutes in (60s window)
+            if is_yes_token:
+                market_state.update_yes_price(bid_decimal, ask_decimal)
+            elif is_no_token:
+                market_state.update_no_price(bid_decimal, ask_decimal)
 
-            if TRADE_WINDOW_START <= seconds_into_sub_interval < TRADE_WINDOW_END and trade_key != self.last_trade_time:
-                self.last_trade_time = trade_key
+            # =========================================================================
+            # STEP 2: Check for EXIT if we have a position
+            # =========================================================================
+            if market_state.has_position:
+                position = market_state.current_position
 
-                logger.info("=" * 80)
-                logger.info(f" LATE-WINDOW TRADE: {now.strftime('%Y-%m-%d %H:%M:%S')} UTC")
-                logger.info(f"   Market: {current_market['slug']}")
-                logger.info(f"   Sub-interval #{sub_interval} ({seconds_into_sub_interval:.1f}s in = {seconds_into_sub_interval/60:.1f} min)")
-                logger.info(f"   Price: ${float(mid_price):,.4f} | Bid: ${float(bid_decimal):,.4f} | Ask: ${float(ask_decimal):,.4f}")
-                logger.info(f"   Trend strength: {'STRONG ✓' if float(mid_price) > 0.60 or float(mid_price) < 0.40 else 'WEAK — may skip'}")
-                logger.info(f"   Price history: {len(self.price_history)} points")
-                logger.info("=" * 80)
+                # Determine current price based on position direction
+                if position.direction == PositionDirection.UP:
+                    current_price = market_state.yes_price.mid if market_state.yes_price else mid_price
+                else:
+                    current_price = market_state.no_price.mid if market_state.no_price else mid_price
 
-                self.run_in_executor(lambda: self._make_trading_decision_sync(float(mid_price)))
+                # Check exit conditions (stop loss or take profit)
+                exit_signal = check_exit(
+                    position=position,
+                    current_price=current_price,
+                    config=self.strategy_config,
+                    market_state=market_state,
+                )
+
+                if exit_signal:
+                    logger.info(format_exit_log(exit_signal, position))
+                    self.run_in_executor(
+                        lambda: self._handle_exit_signal_sync(
+                            exit_signal, position, market_state, current_price
+                        )
+                    )
+                    return  # Exit handled, no further processing
+
+            # =========================================================================
+            # STEP 3: Check for ENTRY if we don't have a position
+            # =========================================================================
+            else:
+                # Check entry conditions (both YES and NO prices)
+                entry_signal = check_entry(
+                    yes_price=market_state.yes_price,
+                    no_price=market_state.no_price,
+                    config=self.strategy_config,
+                    market_state=market_state,
+                )
+
+                if entry_signal:
+                    logger.info(format_entry_log(entry_signal, self.strategy_config, slug))
+                    self.run_in_executor(
+                        lambda: self._handle_entry_signal_sync(
+                            entry_signal, market_state, current_market
+                        )
+                    )
 
         except Exception as e:
             logger.error(f"Error processing quote tick: {e}")
+            import traceback
+            traceback.print_exc()
+
+    # =========================================================================
+    # NEW STRATEGY: Entry and Exit Signal Handlers
+    # =========================================================================
+
+    def _handle_entry_signal_sync(self, signal: EntrySignal, market_state: MarketState, current_market: Dict):
+        """Synchronous wrapper for entry signal handling"""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self._handle_entry_signal(signal, market_state, current_market))
+        finally:
+            loop.close()
+
+    async def _handle_entry_signal(self, signal: EntrySignal, market_state: MarketState, current_market: Dict):
+        """
+        Handle entry signal from the new strategy module.
+
+        Creates a Position and executes the buy order.
+        """
+        # Check simulation mode
+        is_simulation = await self.check_simulation_mode()
+
+        # Create Position object
+        position = Position(
+            market_slug=market_state.market_slug,
+            direction=signal.direction,
+            entry_price=signal.price,
+            entry_time=datetime.now(timezone.utc),
+            size_usd=self.strategy_config.position_size_usd,
+        )
+
+        # Store position in MarketState
+        market_state.current_position = position
+
+        logger.info("=" * 80)
+        logger.info(f"[{'SIMULATION' if is_simulation else 'LIVE'}] 入场执行")
+        logger.info(f"  市场: {market_state.market_slug}")
+        logger.info(f"  方向: {signal.direction.value} ({signal.token_type})")
+        logger.info(f"  价格: {signal.price:.4f}")
+        logger.info(f"  金额: ${self.strategy_config.position_size_usd:.2f} USDC")
+        logger.info(f"  原因: {signal.reason}")
+        logger.info("=" * 80)
+
+        if is_simulation:
+            await self._record_paper_entry(position, signal)
+        else:
+            await self._execute_entry_order(position, signal, current_market)
+
+    def _handle_exit_signal_sync(self, signal: ExitSignal, position: Position, market_state: MarketState, current_price: Decimal):
+        """Synchronous wrapper for exit signal handling"""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self._handle_exit_signal(signal, position, market_state, current_price))
+        finally:
+            loop.close()
+
+    async def _handle_exit_signal(self, signal: ExitSignal, position: Position, market_state: MarketState, current_price: Decimal):
+        """
+        Handle exit signal from the new strategy module.
+
+        Closes the position and executes the sell order.
+        """
+        # Check simulation mode
+        is_simulation = await self.check_simulation_mode()
+
+        # Close the position in MarketState
+        position.close(
+            exit_price=signal.exit_price,
+            exit_time=datetime.now(timezone.utc),
+            reason=signal.reason,
+            status=signal.exit_status,
+        )
+
+        logger.info("=" * 80)
+        logger.info(f"[{'SIMULATION' if is_simulation else 'LIVE'}] 出场执行")
+        logger.info(f"  市场: {market_state.market_slug}")
+        logger.info(f"  方向: {position.direction.value}")
+        logger.info(f"  入场价: {position.entry_price:.4f}")
+        logger.info(f"  出场价: {signal.exit_price:.4f}")
+        logger.info(f"  盈亏: ${position.pnl:+.2f} ({position.pnl_percent:+.1f}%)")
+        logger.info(f"  原因: {signal.reason}")
+        logger.info("=" * 80)
+
+        if is_simulation:
+            await self._record_paper_exit(position, signal)
+        else:
+            await self._execute_exit_order(position, signal, market_state)
+
+        # Record trade in performance tracker
+        self.performance_tracker.record_trade(
+            trade_id=f"{market_state.market_slug}_{int(datetime.now().timestamp())}",
+            direction=position.direction.value.lower(),
+            entry_price=position.entry_price,
+            exit_price=signal.exit_price,
+            size=position.size_usd,
+            entry_time=position.entry_time,
+            exit_time=position.exit_time,
+            signal_score=0.0,  # New strategy doesn't use signal scores
+            signal_confidence=1.0,
+            metadata={
+                "exit_status": signal.exit_status.value,
+                "exit_reason": signal.reason,
+                "strategy": "value_investing",
+            }
+        )
+
+        # Update Grafana if available
+        if hasattr(self, 'grafana_exporter') and self.grafana_exporter:
+            self.grafana_exporter.increment_trade_counter(won=(position.pnl > 0))
+
+    # =========================================================================
+    # NEW STRATEGY: Paper Trade Recording
+    # =========================================================================
+
+    async def _record_paper_entry(self, position: Position, signal: EntrySignal):
+        """Record paper trade entry"""
+        paper_trade = PaperTrade(
+            timestamp=position.entry_time,
+            direction=position.direction.value,
+            size_usd=float(position.size_usd),
+            price=float(position.entry_price),
+            signal_score=0.0,
+            signal_confidence=1.0,
+            outcome="PENDING",
+        )
+        self.paper_trades.append(paper_trade)
+        self._save_paper_trades()
+
+        logger.info(f"[SIMULATION] 纸面交易入场已记录 (共 {len(self.paper_trades)} 笔)")
+
+    async def _record_paper_exit(self, position: Position, signal: ExitSignal):
+        """Record paper trade exit"""
+        # Find the most recent PENDING trade for this market
+        for trade in reversed(self.paper_trades):
+            if trade.outcome == "PENDING" and trade.direction == position.direction.value:
+                trade.outcome = "WIN" if position.pnl > 0 else "LOSS"
+                break
+
+        self._save_paper_trades()
+        logger.info(f"[SIMULATION] 纸面交易出场已记录 (盈亏: {position.pnl:+.2f})")
+
+    # =========================================================================
+    # NEW STRATEGY: Real Order Execution
+    # =========================================================================
+
+    async def _execute_entry_order(self, position: Position, signal: EntrySignal, current_market: Dict):
+        """Execute real entry order"""
+        if not self.instrument_id:
+            logger.error("No instrument available for entry order")
+            return
+
+        try:
+            # Determine which token to buy
+            if signal.direction == PositionDirection.UP:
+                trade_instrument_id = getattr(self, '_yes_instrument_id', self.instrument_id)
+                trade_label = "YES (UP)"
+            else:
+                trade_instrument_id = getattr(self, '_no_instrument_id', None)
+                if trade_instrument_id is None:
+                    logger.warning("NO token instrument not found — cannot buy DOWN")
+                    return
+                trade_label = "NO (DOWN)"
+
+            instrument = self.cache.instrument(trade_instrument_id)
+            if not instrument:
+                logger.error(f"Instrument not in cache: {trade_instrument_id}")
+                return
+
+            logger.info("=" * 80)
+            logger.info("LIVE MODE - PLACING ENTRY ORDER!")
+            logger.info(f"  Buying {trade_label} token")
+            logger.info(f"  Price: ${float(signal.price):.4f}")
+            logger.info(f"  Size: ${float(position.size_usd):.2f} USDC")
+            logger.info("=" * 80)
+
+            # Get position size
+            max_usd_amount = float(position.size_usd)
+            precision = instrument.size_precision
+            min_qty_val = float(getattr(instrument, 'min_quantity', None) or 5.0)
+            token_qty = max(min_qty_val, 5.0)
+            token_qty = round(token_qty, precision)
+
+            qty = Quantity(token_qty, precision=precision)
+            timestamp_ms = int(time.time() * 1000)
+            unique_id = f"VALUE-ENTRY-${max_usd_amount:.0f}-{timestamp_ms}"
+
+            order = self.order_factory.market(
+                instrument_id=trade_instrument_id,
+                order_side=OrderSide.BUY,
+                quantity=qty,
+                client_order_id=ClientOrderId(unique_id),
+                quote_quantity=False,
+                time_in_force=TimeInForce.IOC,
+            )
+
+            self.submit_order(order)
+            logger.info(f"ENTRY ORDER SUBMITTED: {unique_id}")
+            self._track_order_event("placed")
+
+        except Exception as e:
+            logger.error(f"Error placing entry order: {e}")
+            import traceback
+            traceback.print_exc()
+            self._track_order_event("rejected")
+
+    async def _execute_exit_order(self, position: Position, signal: ExitSignal, market_state: MarketState):
+        """
+        Execute real exit order.
+
+        NOTE: On Polymarket, to "sell" a position, we need to buy the OPPOSITE token.
+        This is because Polymarket positions are binary options that resolve to $1 or $0.
+        """
+        if not self.instrument_id:
+            logger.error("No instrument available for exit order")
+            return
+
+        try:
+            # To exit a position, we buy the opposite token
+            # If we hold YES (UP), we sell by buying NO (DOWN)
+            # If we hold NO (DOWN), we sell by buying YES (UP)
+            if position.direction == PositionDirection.UP:
+                # We hold YES, sell by buying NO
+                trade_instrument_id = getattr(self, '_no_instrument_id', None)
+                trade_label = "NO (SELL YES)"
+            else:
+                # We hold NO, sell by buying YES
+                trade_instrument_id = getattr(self, '_yes_instrument_id', self.instrument_id)
+                trade_label = "YES (SELL NO)"
+
+            if trade_instrument_id is None:
+                logger.error(f"Cannot exit: opposite token not found")
+                return
+
+            instrument = self.cache.instrument(trade_instrument_id)
+            if not instrument:
+                logger.error(f"Instrument not in cache: {trade_instrument_id}")
+                return
+
+            logger.info("=" * 80)
+            logger.info("LIVE MODE - PLACING EXIT ORDER!")
+            logger.info(f"  Selling via {trade_label}")
+            logger.info(f"  Exit Price: ${float(signal.exit_price):.4f}")
+            logger.info(f"  P&L: ${float(position.pnl):+.2f} ({float(position.pnl_percent):+.1f}%)")
+            logger.info("=" * 80)
+
+            # Calculate quantity based on position size
+            max_usd_amount = float(position.size_usd)
+            precision = instrument.size_precision
+            min_qty_val = float(getattr(instrument, 'min_quantity', None) or 5.0)
+            token_qty = max(min_qty_val, 5.0)
+            token_qty = round(token_qty, precision)
+
+            qty = Quantity(token_qty, precision=precision)
+            timestamp_ms = int(time.time() * 1000)
+            unique_id = f"VALUE-EXIT-${max_usd_amount:.0f}-{timestamp_ms}"
+
+            order = self.order_factory.market(
+                instrument_id=trade_instrument_id,
+                order_side=OrderSide.BUY,  # Always BUY on Polymarket
+                quantity=qty,
+                client_order_id=ClientOrderId(unique_id),
+                quote_quantity=False,
+                time_in_force=TimeInForce.IOC,
+            )
+
+            self.submit_order(order)
+            logger.info(f"EXIT ORDER SUBMITTED: {unique_id}")
+            self._track_order_event("placed")
+
+        except Exception as e:
+            logger.error(f"Error placing exit order: {e}")
+            import traceback
+            traceback.print_exc()
+            self._track_order_event("rejected")
 
     # ------------------------------------------------------------------
-    # Trading decision (unchanged)
+    # Trading decision (OLD - kept for reference, not used in new strategy)
     # ------------------------------------------------------------------
 
     def _make_trading_decision_sync(self, current_price):
