@@ -1,5 +1,5 @@
 """
-出场逻辑单元测试
+出场逻辑单元测试 - 多目标价止盈策略
 """
 import pytest
 from decimal import Decimal
@@ -11,7 +11,7 @@ from strategy.exit_logic import (
     check_take_profit,
     check_stop_loss,
     ExitSignal,
-    get_next_checkpoint,
+    get_distance_to_nearest_target,
 )
 from strategy.market_state import MarketState
 from strategy.position import Position, PositionStatus, PositionDirection
@@ -40,7 +40,7 @@ class TestCheckStopLoss:
 
         assert signal is not None
         assert signal.exit_status == PositionStatus.CLOSED_SL
-        assert signal.checkpoint == 0
+        assert signal.level == 0
 
     def test_stop_loss_at_threshold(self, config, position):
         """测试价格等于止损线时触发"""
@@ -57,93 +57,88 @@ class TestCheckStopLoss:
 
 
 class TestCheckTakeProfit:
-    """check_take_profit 测试类"""
+    """check_take_profit 测试类 - 多目标价策略"""
 
     @pytest.fixture
     def config(self):
         return StrategyConfig()
 
     @pytest.fixture
-    def market_state(self):
-        now = datetime.now(timezone.utc)
-        return MarketState(
-            market_slug="test",
-            market_start_time=now,
-            market_end_time=now + timedelta(minutes=15),
-        )
-
-    def test_tp1_triggered(self, config, market_state):
-        """测试 TP1 触发"""
-        # 创建 2 分钟前的持仓
-        entry_time = datetime.now(timezone.utc) - timedelta(minutes=2.5)
-        position = Position(
+    def position(self):
+        return Position(
             market_slug="test",
             direction=PositionDirection.UP,
             entry_price=Decimal("0.30"),
-            entry_time=entry_time,
+            entry_time=datetime.now(timezone.utc),
             size_usd=Decimal("2.0"),
         )
 
-        signal = check_take_profit(position, config, market_state, Decimal("0.42"))
+    def test_tp1_highest_triggered(self, config, position):
+        """测试最高目标价 TP1 触发"""
+        # 价格 0.55 >= 0.55（最高目标价）
+        signal = check_take_profit(position, config, Decimal("0.55"))
 
         assert signal is not None
         assert signal.exit_status == PositionStatus.CLOSED_TP1
-        assert signal.checkpoint == 1
+        assert signal.level == 1
 
-    def test_tp1_not_reached(self, config, market_state):
-        """测试 TP1 价格未达标"""
-        entry_time = datetime.now(timezone.utc) - timedelta(minutes=2.5)
-        position = Position(
-            market_slug="test",
-            direction=PositionDirection.UP,
-            entry_price=Decimal("0.30"),
-            entry_time=entry_time,
-            size_usd=Decimal("2.0"),
-        )
+    def test_tp2_middle_triggered(self, config, position):
+        """测试中等目标价 TP2 触发"""
+        # 价格 0.50 >= 0.50（中等目标价），但 < 0.55（最高目标价）
+        signal = check_take_profit(position, config, Decimal("0.50"))
 
-        signal = check_take_profit(position, config, market_state, Decimal("0.38"))
-
-        assert signal is None
-        assert market_state.tp1_checked is True  # 检查点已标记
-
-    def test_tp2_triggered_at_4min(self, config, market_state):
-        """测试 TP2 在 4 分钟时触发"""
-        # 创建 4 分钟前的持仓
-        entry_time = datetime.now(timezone.utc) - timedelta(minutes=4)
-        position = Position(
-            market_slug="test",
-            direction=PositionDirection.UP,
-            entry_price=Decimal("0.30"),
-            entry_time=entry_time,
-            size_usd=Decimal("2.0"),
-        )
-
-        # 标记 TP1 为已检查
-        market_state.mark_checkpoint_checked(1)
-
-        # 直接检查 TP2（价格 0.50 >= 目标 0.48，应该触发）
-        signal = check_take_profit(position, config, market_state, Decimal("0.50"))
         assert signal is not None
         assert signal.exit_status == PositionStatus.CLOSED_TP2
+        assert signal.level == 2
 
-    def test_all_checkpoints_checked(self, config, market_state):
-        """测试所有检查点都被标记"""
-        entry_time = datetime.now(timezone.utc) - timedelta(minutes=7)
-        position = Position(
-            market_slug="test",
-            direction=PositionDirection.UP,
-            entry_price=Decimal("0.30"),
-            entry_time=entry_time,
-            size_usd=Decimal("2.0"),
-        )
+    def test_tp3_lowest_triggered(self, config, position):
+        """测试最低目标价 TP3 触发"""
+        # 价格 0.45 >= 0.45（最低目标价），但 < 0.50（中等目标价）
+        signal = check_take_profit(position, config, Decimal("0.45"))
 
-        # 价格未达标
-        signal = check_take_profit(position, config, market_state, Decimal("0.35"))
+        assert signal is not None
+        assert signal.exit_status == PositionStatus.CLOSED_TP3
+        assert signal.level == 3
+
+    def test_price_between_targets(self, config, position):
+        """测试价格在目标价之间触发最低目标价"""
+        # 价格 0.47 在 0.45 和 0.50 之间，0.47 >= 0.45 所以触发 TP3
+        signal = check_take_profit(position, config, Decimal("0.47"))
+
+        assert signal is not None
+        assert signal.level == 3  # 最低目标价
+        assert signal.exit_status == PositionStatus.CLOSED_TP3
+
+    def test_price_below_all_targets(self, config, position):
+        """测试价格低于所有目标价不触发"""
+        # 价格 0.40 < 0.45（最低目标价）
+        signal = check_take_profit(position, config, Decimal("0.40"))
 
         assert signal is None
-        assert market_state.tp1_checked is True
-        assert market_state.tp2_checked is True
-        assert market_state.tp3_checked is True
+
+    def test_price_above_highest_priority(self, config, position):
+        """测试价格超过最高目标价时优先以最高价卖出"""
+        # 价格 0.60 > 0.55（最高目标价），应该匹配 TP1
+        signal = check_take_profit(position, config, Decimal("0.60"))
+
+        assert signal is not None
+        assert signal.exit_status == PositionStatus.CLOSED_TP1
+        assert signal.level == 1
+        # 目标价应该是 0.55（最高）
+        assert "0.55" in signal.reason
+
+    def test_high_price_first_check(self, config, position):
+        """
+        测试高价格优先检查 - 这是多目标价策略的核心测试
+        当价格同时满足多个目标价时，应该优先匹配最高目标价
+        """
+        # 价格 0.58 >= 0.55（最高目标价）
+        # 应该直接触发 TP1，而不是 TP2 或 TP3
+        signal = check_take_profit(position, config, Decimal("0.58"))
+
+        assert signal is not None
+        assert signal.level == 1  # 最高级别
+        assert signal.exit_status == PositionStatus.CLOSED_TP1
 
 
 class TestCheckExit:
@@ -154,32 +149,32 @@ class TestCheckExit:
         return StrategyConfig()
 
     @pytest.fixture
-    def market_state(self):
-        now = datetime.now(timezone.utc)
-        return MarketState(
-            market_slug="test",
-            market_start_time=now,
-            market_end_time=now + timedelta(minutes=15),
-        )
-
-    def test_stop_loss_priority(self, config, market_state):
-        """测试止损优先级高于止盈"""
-        entry_time = datetime.now(timezone.utc) - timedelta(minutes=2)
-        position = Position(
+    def position(self):
+        return Position(
             market_slug="test",
             direction=PositionDirection.UP,
             entry_price=Decimal("0.30"),
-            entry_time=entry_time,
+            entry_time=datetime.now(timezone.utc),
             size_usd=Decimal("2.0"),
         )
 
-        # 价格同时满足止损和 TP1 条件时，止损优先
-        signal = check_exit(position, Decimal("0.19"), config, market_state)
+    def test_stop_loss_priority(self, config, position):
+        """测试止损优先级高于止盈"""
+        # 价格 0.19 触发止损
+        signal = check_exit(position, Decimal("0.19"), config)
 
         assert signal is not None
         assert signal.exit_status == PositionStatus.CLOSED_SL
 
-    def test_closed_position_no_signal(self, config, market_state):
+    def test_take_profit_when_price_rises(self, config, position):
+        """测试价格上涨时触发止盈"""
+        # 价格 0.52 >= 0.50（中等目标价）
+        signal = check_exit(position, Decimal("0.52"), config)
+
+        assert signal is not None
+        assert signal.exit_status == PositionStatus.CLOSED_TP2
+
+    def test_closed_position_no_signal(self, config):
         """测试已平仓的持仓不产生信号"""
         position = Position(
             market_slug="test",
@@ -190,41 +185,39 @@ class TestCheckExit:
             status=PositionStatus.CLOSED_TP1,
         )
 
-        signal = check_exit(position, Decimal("0.19"), config, market_state)
+        signal = check_exit(position, Decimal("0.19"), config)
 
         assert signal is None
 
 
-class TestGetNextCheckpoint:
-    """get_next_checkpoint 测试类"""
+class TestGetDistanceToNearestTarget:
+    """get_distance_to_nearest_target 测试类"""
 
     @pytest.fixture
-    def market_state(self):
-        now = datetime.now(timezone.utc)
-        return MarketState(
-            market_slug="test",
-            market_start_time=now,
-            market_end_time=now + timedelta(minutes=15),
-        )
+    def config(self):
+        return StrategyConfig()
 
-    def test_first_checkpoint(self, market_state):
-        """测试第一个检查点"""
-        assert get_next_checkpoint(market_state) == 1
+    def test_distance_to_lowest_target(self, config):
+        """测试距离最低目标价的距离"""
+        # 价格 0.40，最近目标价是 0.45
+        distance, level = get_distance_to_nearest_target(Decimal("0.40"), config)
 
-    def test_second_checkpoint(self, market_state):
-        """测试第二个检查点"""
-        market_state.tp1_checked = True
-        assert get_next_checkpoint(market_state) == 2
+        assert distance == Decimal("0.05")
+        assert level == 3  # 最低目标价
 
-    def test_third_checkpoint(self, market_state):
-        """测试第三个检查点"""
-        market_state.tp1_checked = True
-        market_state.tp2_checked = True
-        assert get_next_checkpoint(market_state) == 3
+    def test_distance_to_middle_target(self, config):
+        """测试距离中等目标价的距离"""
+        # 价格 0.47，最近目标价是 0.50
+        distance, level = get_distance_to_nearest_target(Decimal("0.47"), config)
 
-    def test_all_checked(self, market_state):
-        """测试所有检查点已检查"""
-        market_state.tp1_checked = True
-        market_state.tp2_checked = True
-        market_state.tp3_checked = True
-        assert get_next_checkpoint(market_state) == 0
+        assert distance == Decimal("0.03")
+        assert level == 2  # 中等目标价
+
+    def test_all_targets_reached(self, config):
+        """测试所有目标价已达到"""
+        # 价格 0.60 >= 所有目标价
+        distance, level = get_distance_to_nearest_target(Decimal("0.60"), config)
+
+        # 没有更近的目标价
+        assert distance == Decimal("999")
+        assert level == 0

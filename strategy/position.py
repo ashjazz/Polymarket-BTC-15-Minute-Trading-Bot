@@ -92,6 +92,10 @@ class Position:
         """计算未实现盈亏百分比"""
         return (current_price - self.entry_price) / self.entry_price * 100
 
+    def unrealized_pnl_percent(self, current_price: Decimal) -> Decimal:
+        """计算未实现盈亏百分比"""
+        return (current_price - self.entry_price) / self.entry_price * 100
+
     def to_dict(self) -> dict:
         """序列化为字典"""
         return {

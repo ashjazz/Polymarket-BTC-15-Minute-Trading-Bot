@@ -1,11 +1,11 @@
 """
 出场逻辑模块
 
-实现时间阶梯止盈和止损逻辑。
+实现实时价格监控的多目标价止盈和止损逻辑。
 """
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Optional
+from typing import Optional, Tuple
 from datetime import datetime, timezone
 from loguru import logger
 
@@ -20,27 +20,23 @@ class ExitSignal:
     exit_price: Decimal
     exit_status: PositionStatus  # CLOSED_TP1, CLOSED_TP2, CLOSED_TP3, CLOSED_SL
     reason: str
-    checkpoint: int  # 1, 2, 3 for TP, 0 for SL
+    level: int  # 命中的止盈级别 (1, 2, 3...) 或 0 表示止损
 
 
 def check_take_profit(
     position: Position,
     config: StrategyConfig,
-    market_state: MarketState,
     current_price: Decimal,
 ) -> Optional[ExitSignal]:
     """
-    检查是否满足止盈条件
+    检查是否达到任一止盈目标（实时监控）
 
-    止盈条件（时间阶梯）:
-    - T+2min: 价格 >= 0.40 → 卖出
-    - T+4min: 价格 >= 0.48 → 卖出
-    - T+6min: 价格 >= 0.55 → 卖出
+    从高到低检查目标价列表，一旦当前价格 >= 任一目标价，立即触发卖出。
+    这样当价格很高时（如0.55），会优先以最高目标价卖出，获得最大收益。
 
     Args:
         position: 当前持仓
         config: 策略配置
-        market_state: 市场状态
         current_price: 当前价格
 
     Returns:
@@ -50,115 +46,31 @@ def check_take_profit(
     if not position.is_open:
         return None
 
-    holding_minutes = position.holding_minutes
+    # 从高到低检查目标价
+    hit, level, target_price = config.check_take_profit_hit(current_price)
 
-    # 检查点 1: T+2分钟
-    if not market_state.tp1_checked:
-        tp1_minutes, tp1_price = config.get_take_profit_target(1)
+    if hit:
+        # 确定出场状态
+        if level == 1:
+            exit_status = PositionStatus.CLOSED_TP1
+        elif level == 2:
+            exit_status = PositionStatus.CLOSED_TP2
+        elif level == 3:
+            exit_status = PositionStatus.CLOSED_TP3
+        else:
+            # 支持更多级别
+            exit_status = PositionStatus.CLOSED_TP3
 
-        if holding_minutes >= tp1_minutes:
-            market_state.mark_checkpoint_checked(1)
-            logger.debug(f"[EXIT] TP1 检查点到达: {holding_minutes:.1f}min >= {tp1_minutes}min")
+        logger.info(
+            f"[EXIT] TP{level} 触发: 当前价格 {current_price:.4f} >= 目标价 {target_price:.4f}"
+        )
 
-            if current_price >= tp1_price:
-                logger.info(
-                    f"[EXIT] TP1 触发: 价格 {current_price:.4f} >= 目标 {tp1_price:.4f}"
-                )
-                return ExitSignal(
-                    exit_price=current_price,
-                    exit_status=PositionStatus.CLOSED_TP1,
-                    reason=f"Price reached TP1 target ({tp1_price:.2f}) at T+{tp1_minutes}min",
-                    checkpoint=1,
-                )
-            else:
-                logger.debug(
-                    f"[EXIT] TP1 未达标: 价格 {current_price:.4f} < 目标 {tp1_price:.4f}"
-                )
-
-    # 检查点 2: T+4分钟
-    if not market_state.tp2_checked:
-        tp2_minutes, tp2_price = config.get_take_profit_target(2)
-
-        if holding_minutes >= tp2_minutes:
-            market_state.mark_checkpoint_checked(2)
-            logger.debug(f"[EXIT] TP2 检查点到达: {holding_minutes:.1f}min >= {tp2_minutes}min")
-
-            if current_price >= tp2_price:
-                logger.info(
-                    f"[EXIT] TP2 触发: 价格 {current_price:.4f} >= 目标 {tp2_price:.4f}"
-                )
-                return ExitSignal(
-                    exit_price=current_price,
-                    exit_status=PositionStatus.CLOSED_TP2,
-                    reason=f"Price reached TP2 target ({tp2_price:.2f}) at T+{tp2_minutes}min",
-                    checkpoint=2,
-                )
-            else:
-                logger.debug(
-                    f"[EXIT] TP2 未达标: 价格 {current_price:.4f} < 目标 {tp2_price:.4f}"
-                )
-
-    # 检查点 3: T+6分钟
-    if not market_state.tp3_checked:
-        tp3_minutes, tp3_price = config.get_take_profit_target(3)
-
-        if holding_minutes >= tp3_minutes:
-            market_state.mark_checkpoint_checked(3)
-            logger.debug(f"[EXIT] TP3 检查点到达: {holding_minutes:.1f}min >= {tp3_minutes}min")
-
-            if current_price >= tp3_price:
-                logger.info(
-                    f"[EXIT] TP3 触发: 价格 {current_price:.4f} >= 目标 {tp3_price:.4f}"
-                )
-                return ExitSignal(
-                    exit_price=current_price,
-                    exit_status=PositionStatus.CLOSED_TP3,
-                    reason=f"Price reached TP3 target ({tp3_price:.2f}) at T+{tp3_minutes}min",
-                    checkpoint=3,
-                )
-            else:
-                logger.debug(
-                    f"[EXIT] TP3 未达标: 价格 {current_price:.4f} < 目标 {tp3_price:.4f}"
-                )
-
-    return None
-
-
-def check_exit(
-    position: Position,
-    current_price: Decimal,
-    config: StrategyConfig,
-    market_state: MarketState,
-) -> Optional[ExitSignal]:
-    """
-    检查是否满足出场条件（止盈或止损）
-
-    优先级:
-    1. 止损（实时监控）
-    2. 止盈（时间阶梯）
-
-    Args:
-        position: 当前持仓
-        current_price: 当前价格
-        config: 策略配置
-        market_state: 市场状态
-
-    Returns:
-        ExitSignal: 如果满足出场条件
-        None: 如果不满足出场条件
-    """
-    if not position.is_open:
-        return None
-
-    # 优先检查止损
-    sl_signal = check_stop_loss(position, current_price, config)
-    if sl_signal:
-        return sl_signal
-
-    # 然后检查止盈
-    tp_signal = check_take_profit(position, config, market_state, current_price)
-    if tp_signal:
-        return tp_signal
+        return ExitSignal(
+            exit_price=current_price,
+            exit_status=exit_status,
+            reason=f"Price reached TP{level} target ({target_price:.2f})",
+            level=level,
+        )
 
     return None
 
@@ -187,14 +99,53 @@ def check_stop_loss(
 
     if current_price <= config.stop_loss_price:
         logger.warning(
-            f"[EXIT] 止损触发: 价格 {current_price:.4f} <= 止损线 {config.stop_loss_price:.4f}"
+            f"[EXIT] 止损触发: 当前价格 {current_price:.4f} <= 止损线 {config.stop_loss_price:.4f}"
         )
         return ExitSignal(
             exit_price=current_price,
             exit_status=PositionStatus.CLOSED_SL,
             reason=f"Price fell below stop-loss threshold ({config.stop_loss_price:.2f})",
-            checkpoint=0,
+            level=0,
         )
+
+    return None
+
+
+def check_exit(
+    position: Position,
+    current_price: Decimal,
+    config: StrategyConfig,
+    market_state: Optional[MarketState] = None,
+) -> Optional[ExitSignal]:
+    """
+    检查是否满足出场条件（止盈或止损）
+
+    优先级:
+    1. 止损（实时监控）
+    2. 止盈（实时监控，从高到低检查目标价）
+
+    Args:
+        position: 当前持仓
+        current_price: 当前价格
+        config: 策略配置
+        market_state: 市场状态（可选，用于日志）
+
+    Returns:
+        ExitSignal: 如果满足出场条件
+        None: 如果不满足出场条件
+    """
+    if not position.is_open:
+        return None
+
+    # 优先检查止损
+    sl_signal = check_stop_loss(position, current_price, config)
+    if sl_signal:
+        return sl_signal
+
+    # 然后检查止盈（实时价格监控）
+    tp_signal = check_take_profit(position, config, current_price)
+    if tp_signal:
+        return tp_signal
 
     return None
 
@@ -211,7 +162,7 @@ def format_exit_log(signal: ExitSignal, position: Position) -> str:
     if signal.exit_status == PositionStatus.CLOSED_SL:
         header = "STOP-LOSS TRIGGERED"
     else:
-        header = f"TAKE-PROFIT TRIGGERED (TP{signal.checkpoint})"
+        header = f"TAKE-PROFIT TRIGGERED (TP{signal.level})"
 
     pnl = position.unrealized_pnl(signal.exit_price)
     pnl_pct = position.unrealized_pnl_percent(signal.exit_price)
@@ -227,17 +178,25 @@ def format_exit_log(signal: ExitSignal, position: Position) -> str:
 """
 
 
-def get_next_checkpoint(market_state: MarketState) -> int:
+def get_distance_to_nearest_target(current_price: Decimal, config: StrategyConfig) -> Tuple[Decimal, int]:
     """
-    获取下一个待检查的止盈点
+    获取当前价格距离最近目标价的距离
+
+    Args:
+        current_price: 当前价格
+        config: 策略配置
 
     Returns:
-        检查点编号 (1, 2, 3) 或 0（如果都已检查）
+        (distance, level): 距离和目标级别
     """
-    if not market_state.tp1_checked:
-        return 1
-    if not market_state.tp2_checked:
-        return 2
-    if not market_state.tp3_checked:
-        return 3
-    return 0
+    min_distance = Decimal("999")
+    nearest_level = 0
+
+    for i, target_price in enumerate(config.take_profit_prices):
+        if current_price < target_price:
+            distance = target_price - current_price
+            if distance < min_distance:
+                min_distance = distance
+                nearest_level = i + 1
+
+    return (min_distance, nearest_level)
